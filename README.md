@@ -122,7 +122,7 @@ python3 cli/run_extraction.py \
   - 系统设置 → 隐私与安全 → 屏幕录制（允许终端或 Python 应用录屏）；
   - 系统设置 → 隐私与安全 → 辅助功能（允许终端或 Python 应用控制鼠标/键盘、激活窗口）；
 - 微信客户端处于前台或可被激活；
-- Python 3.12（本项目示例为：`/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12`）。
+- Python 3.12（请使用本机可用的解释器，例如 `python3` 或 `python3.12`；公开文档不展示个人绝对路径）。
 
 依赖库安装：
 - 推荐使用本项目的 `requirements.txt` 安装：
