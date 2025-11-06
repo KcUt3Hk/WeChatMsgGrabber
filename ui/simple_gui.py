@@ -21,6 +21,7 @@ import os
 import sys
 import threading
 import subprocess
+import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import List
@@ -124,8 +125,14 @@ class SimpleWechatGUI:
 
         # 第六行：操作按钮
         row += 1
-        ttk.Button(frm, text="开始扫描", command=self.on_start_scan).grid(row=row, column=0, sticky=tk.W)
-        ttk.Button(frm, text="退出", command=self.root.quit).grid(row=row, column=1, sticky=tk.W)
+        self.btn_start = ttk.Button(frm, text="开始扫描", command=self.on_start_scan)
+        self.btn_start.grid(row=row, column=0, sticky=tk.W)
+        self.btn_stop = ttk.Button(frm, text="停止扫描", command=self.on_stop_scan, state="disabled")
+        self.btn_stop.grid(row=row, column=1, sticky=tk.W)
+        ttk.Button(frm, text="复制命令", command=self.on_copy_command).grid(row=row, column=2, sticky=tk.W)
+        ttk.Button(frm, text="保存配置", command=self.on_save_config).grid(row=row, column=3, sticky=tk.W)
+        ttk.Button(frm, text="加载配置", command=self.on_load_config).grid(row=row, column=4, sticky=tk.W)
+        ttk.Button(frm, text="退出", command=self.root.quit).grid(row=row, column=5, sticky=tk.W)
 
         # 预览图与日志
         row += 1
@@ -178,23 +185,45 @@ class SimpleWechatGUI:
         """启动扫描：在后台线程中执行命令并实时输出日志"""
         cmd = self._build_scan_command()
         self._append_log("运行命令: " + " ".join(cmd))
+        # 切换按钮状态：开始 -> 禁用，停止 -> 启用
+        self.btn_start.configure(state="disabled")
+        self.btn_stop.configure(state="normal")
 
         def worker():
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                for line in proc.stdout:
+                self.scan_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                for line in self.scan_proc.stdout:
                     self._append_log(line.rstrip())
-                code = proc.wait()
+                code = self.scan_proc.wait()
                 self._append_log(f"进程退出码: {code}")
                 if code == 0:
-                    messagebox.showinfo("完成", "扫描完成")
+                    try:
+                        messagebox.showinfo("完成", "扫描完成")
+                    except Exception:
+                        pass
                 else:
-                    messagebox.showwarning("警告", f"扫描退出码: {code}")
+                    try:
+                        messagebox.showwarning("警告", f"扫描退出码: {code}")
+                    except Exception:
+                        pass
             except Exception as e:
                 self._append_log(f"执行失败: {e}")
-                messagebox.showerror("错误", str(e))
+                try:
+                    messagebox.showerror("错误", str(e))
+                except Exception:
+                    pass
+            finally:
+                # 回到可点击状态
+                def restore_buttons():
+                    self.btn_start.configure(state="normal")
+                    self.btn_stop.configure(state="disabled")
+                try:
+                    self.root.after(0, restore_buttons)
+                except Exception:
+                    pass
 
-        threading.Thread(target=worker, daemon=True).start()
+        self.scan_thread = threading.Thread(target=worker, daemon=True)
+        self.scan_thread.start()
 
     def on_preview_chat_area(self):
         """生成聊天区域预览图：调用 capture_rect_preview 并在界面显示"""
@@ -303,6 +332,110 @@ class SimpleWechatGUI:
             subprocess.run(["open", outdir], check=True)
         except Exception as e:
             messagebox.showerror("错误", f"打开目录失败: {e}")
+
+    def on_stop_scan(self):
+        """停止扫描子进程并恢复按钮状态
+
+        函数级注释：
+        - 如果有正在运行的 scan 子进程，调用 terminate() 终止；
+        - 追加日志提示，并在主线程恢复按钮状态；
+        - 容错：若进程已退出或为空，给出提示。
+        """
+        if hasattr(self, "scan_proc") and self.scan_proc and self.scan_proc.poll() is None:
+            try:
+                self.scan_proc.terminate()
+                self._append_log("已请求终止扫描进程…")
+                code = self.scan_proc.wait(timeout=5)
+                self._append_log(f"扫描进程已结束，退出码: {code}")
+            except Exception as e:
+                self._append_log(f"终止失败: {e}")
+        else:
+            self._append_log("当前无正在运行的扫描进程。")
+        # 恢复按钮状态
+        self.btn_start.configure(state="normal")
+        self.btn_stop.configure(state="disabled")
+
+    def on_copy_command(self):
+        """构建命令并复制到剪贴板
+
+        函数级注释：
+        - 使用 _build_scan_command() 拼接命令字符串；
+        - 调用 Tk 的剪贴板 API 将命令复制，以便用户在终端直接执行。
+        """
+        cmd = self._build_scan_command()
+        cmd_str = " ".join(cmd)
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(cmd_str)
+            messagebox.showinfo("已复制", "命令已复制到剪贴板")
+        except Exception as e:
+            messagebox.showerror("错误", f"复制失败: {e}")
+
+    def on_save_config(self):
+        """保存当前 UI 配置到项目根目录 ui_config.json
+
+        函数级注释：
+        - 收集所有输入字段与开关，序列化为 JSON；
+        - 选择输出目录与导出格式一并保存，便于下次快速恢复；
+        - 使用 ensure_ascii=False 保留中文。
+        """
+        cfg_path = os.path.join(PROJECT_ROOT, "ui_config.json")
+        data = {
+            "window_title": self.var_window_title.get(),
+            "chat_area": self.var_chat_area.get(),
+            "direction": self.var_direction.get(),
+            "full_fetch": self.var_full_fetch.get(),
+            "go_top_first": self.var_go_top_first.get(),
+            "skip_empty": self.var_skip_empty.get(),
+            "verbose": self.var_verbose.get(),
+            "ocr_lang": self.var_ocr_lang.get(),
+            "output_dir": self.var_output_dir.get(),
+            "filename_prefix": self.var_filename_prefix.get(),
+            "scroll_delay": self.var_scroll_delay.get(),
+            "max_scrolls": self.var_max_scrolls.get(),
+            "max_spm": self.var_max_spm.get(),
+            "formats": {name: var.get() for name, var in self.format_vars.items()},
+        }
+        try:
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            messagebox.showinfo("已保存", f"配置已保存到: {cfg_path}")
+        except Exception as e:
+            messagebox.showerror("错误", f"保存失败: {e}")
+
+    def on_load_config(self):
+        """从项目根目录 ui_config.json 加载配置并回填到 UI
+
+        函数级注释：
+        - 若文件存在，读取 JSON 并设置各字段与复选框；
+        - 若不存在，提示用户先保存一次配置。
+        """
+        cfg_path = os.path.join(PROJECT_ROOT, "ui_config.json")
+        if not os.path.exists(cfg_path):
+            messagebox.showinfo("提示", "未找到配置文件，请先保存配置")
+            return
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.var_window_title.set(data.get("window_title", ""))
+            self.var_chat_area.set(data.get("chat_area", ""))
+            self.var_direction.set(data.get("direction", "up"))
+            self.var_full_fetch.set(bool(data.get("full_fetch", False)))
+            self.var_go_top_first.set(bool(data.get("go_top_first", False)))
+            self.var_skip_empty.set(bool(data.get("skip_empty", True)))
+            self.var_verbose.set(bool(data.get("verbose", True)))
+            self.var_ocr_lang.set(data.get("ocr_lang", "ch"))
+            self.var_output_dir.set(data.get("output_dir", os.path.join(PROJECT_ROOT, "output")))
+            self.var_filename_prefix.set(data.get("filename_prefix", "auto_wechat_scan"))
+            self.var_scroll_delay.set(str(data.get("scroll_delay", "")))
+            self.var_max_scrolls.set(str(data.get("max_scrolls", "60")))
+            self.var_max_spm.set(str(data.get("max_spm", "40")))
+            formats_data = data.get("formats", {})
+            for name, var in self.format_vars.items():
+                var.set(bool(formats_data.get(name, var.get())))
+            messagebox.showinfo("已加载", "配置已回填到界面")
+        except Exception as e:
+            messagebox.showerror("错误", f"加载失败: {e}")
 
 
 def main():
