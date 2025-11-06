@@ -25,7 +25,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import List
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageGrab
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -83,6 +83,7 @@ class SimpleWechatGUI:
         ttk.Label(frm, text="聊天区域坐标 x,y,w,h（可选）:").grid(row=row, column=2, sticky=tk.W)
         ttk.Entry(frm, textvariable=self.var_chat_area, width=24).grid(row=row, column=3, sticky=tk.W)
         ttk.Button(frm, text="预览聊天区域", command=self.on_preview_chat_area).grid(row=row, column=4, sticky=tk.W)
+        ttk.Button(frm, text="框选聊天区域", command=self.on_select_chat_area).grid(row=row, column=5, sticky=tk.W)
 
         # 第二行：滚动与 OCR
         row += 1
@@ -215,6 +216,76 @@ class SimpleWechatGUI:
             messagebox.showerror("错误", f"预览失败: {e}")
         except Exception as e:
             messagebox.showerror("错误", f"预览异常: {e}")
+
+    def on_select_chat_area(self):
+        """通过屏幕截图 + Canvas 框选的方式，生成聊天区域坐标并回填到输入框
+
+        函数级注释：
+        - 使用 Pillow 的 ImageGrab 抓取屏幕快照；
+        - 在 Toplevel 窗口的 Canvas 上绑定鼠标事件以绘制选区；
+        - 根据显示缩放比换算为真实屏幕坐标，更新 var_chat_area。
+        """
+        try:
+            screenshot = ImageGrab.grab()
+        except Exception as e:
+            messagebox.showerror("错误", f"无法抓取屏幕截图，请检查屏幕录制权限：{e}")
+            return
+
+        # 计算显示缩放，控制在合理窗口尺寸
+        max_w, max_h = 1200, 800
+        sw, sh = screenshot.width, screenshot.height
+        scale = min(max_w / sw, max_h / sh)
+        if scale > 1:
+            scale = 1.0
+        disp_w, disp_h = int(sw * scale), int(sh * scale)
+        display_img = screenshot.resize((disp_w, disp_h), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(display_img)
+
+        top = tk.Toplevel(self.root)
+        top.title("框选聊天区域（按拖拽左键选区，松开结束）")
+        top.geometry(f"{disp_w}x{disp_h}")
+        canvas = tk.Canvas(top, width=disp_w, height=disp_h, cursor="cross")
+        canvas.pack()
+        canvas.create_image(0, 0, image=photo, anchor=tk.NW)
+        # 防止图片被 GC 回收
+        canvas.image = photo
+
+        rect_id = {"id": None}
+        state = {"x0": 0, "y0": 0}
+
+        def on_press(event):
+            """鼠标按下事件：记录起点并创建矩形框"""
+            state["x0"], state["y0"] = event.x, event.y
+            if rect_id["id"]:
+                canvas.delete(rect_id["id"])
+            rect_id["id"] = canvas.create_rectangle(event.x, event.y, event.x, event.y, outline="red", width=2)
+
+        def on_move(event):
+            """拖动事件：更新选区矩形的右下角坐标"""
+            if rect_id["id"]:
+                canvas.coords(rect_id["id"], state["x0"], state["y0"], event.x, event.y)
+
+        def on_release(event):
+            """释放事件：计算真实屏幕坐标并写入 var_chat_area"""
+            x1, y1 = event.x, event.y
+            x0, y0 = state["x0"], state["y0"]
+            x_min, y_min = min(x0, x1), min(y0, y1)
+            w = abs(x1 - x0)
+            h = abs(y1 - y0)
+            if w < 3 or h < 3:
+                messagebox.showinfo("提示", "选区过小，请重新框选")
+                return
+            real_x = int(x_min / scale)
+            real_y = int(y_min / scale)
+            real_w = int(w / scale)
+            real_h = int(h / scale)
+            self.var_chat_area.set(f"{real_x},{real_y},{real_w},{real_h}")
+            self._append_log(f"框选坐标: {self.var_chat_area.get()}")
+            top.destroy()
+
+        canvas.bind("<ButtonPress-1>", on_press)
+        canvas.bind("<B1-Motion>", on_move)
+        canvas.bind("<ButtonRelease-1>", on_release)
 
     def on_choose_output(self):
         """选择输出目录（使用原生文件夹选择对话框）"""
