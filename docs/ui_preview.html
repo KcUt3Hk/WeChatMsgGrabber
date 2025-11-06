@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WeChat OCR 简易前端 UI 预览说明</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
+    .header { margin-bottom: 12px; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .tag { display:inline-block; background:#f4f4f4; border:1px solid #ddd; border-radius:6px; padding:2px 6px; margin-right:6px; font-size:12px; }
+    code { background:#f9f9f9; border:1px solid #eee; border-radius:4px; padding:2px 4px; }
+  </style>
+  <!-- 本页用于说明新增的 Tkinter 简易前端 UI 的功能点与运行方式。 -->
+</head>
+<body>
+  <div class="header">
+    <h1>WeChat OCR 简易前端 UI</h1>
+    <p>该 UI 提供最小化的人机交互，用于设置微信窗口与聊天区域、OCR 语言、滚动与导出参数，并可预览聊天区域与查看运行日志。</p>
+  </div>
+
+  <div class="card">
+    <h2>运行</h2>
+    <p>在项目根目录运行：</p>
+    <p><code>/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 ui/simple_gui.py</code></p>
+    <p>如首次运行提示缺少依赖，请安装 Pillow：</p>
+    <p><code>/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 -m pip install pillow</code></p>
+  </div>
+
+  <div class="card">
+    <h2>核心功能</h2>
+    <div class="grid">
+      <div>
+        <h3>参数设置</h3>
+        <span class="tag">窗口标题</span>
+        <span class="tag">聊天区域 x,y,w,h</span>
+        <span class="tag">方向 up/down</span>
+        <span class="tag">scroll-delay</span>
+        <span class="tag">max-scrolls</span>
+        <span class="tag">spm</span>
+        <span class="tag">OCR 语言</span>
+        <span class="tag">导出格式 json/csv/md</span>
+        <span class="tag">输出目录</span>
+        <span class="tag">文件前缀</span>
+        <span class="tag">skip-empty</span>
+        <span class="tag">verbose</span>
+      </div>
+      <div>
+        <h3>操作</h3>
+        <span class="tag">预览聊天区域</span>
+        <span class="tag">开始扫描</span>
+        <span class="tag">打开输出目录</span>
+        <span class="tag">退出</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>权限与提示</h2>
+    <ul>
+      <li>请在“系统设置 → 隐私与安全性”中授予屏幕录制与辅助功能权限。</li>
+      <li>首次加载 OCR 模型耗时较长属正常现象。</li>
+      <li>如 auto_wechat_scan.py 不支持 txt 格式，请取消勾选 txt。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>文件位置</h2>
+    <p>UI 源码：<code>ui/simple_gui.py</code></p>
+    <p>预览脚本：<code>scripts/capture_rect_preview.py</code></p>
+  </div>
+
+  <footer>
+    <small>本页为说明文档，用于在线预览与验证 UI 变更。桌面应用请按上文命令本地运行。</small>
+  </footer>
+</body>
+</html>
