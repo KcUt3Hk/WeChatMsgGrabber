@@ -537,3 +537,35 @@ CHANGELOG 维护建议：
 - UI 拓展：在 CLI 基础上进阶到 TUI 或轻量 Web UI。
 
 欢迎反馈与贡献！
+## 简易前端 UI 使用（本地里程碑 v0.1）
+
+该 UI 为最小可用的桌面界面（Tkinter），用于人工介入设置微信聊天窗口与导出选项，并在运行过程中实时查看日志。
+
+- 源码位置：`ui/simple_gui.py`
+- 预览说明页面：`docs/ui_preview.html`（已提供本地 HTTP 服务预览）
+
+运行示例（保持隐私脱敏，示例使用通用 python3）：
+
+```
+python3 ui/simple_gui.py
+```
+
+如首次运行提示缺少依赖，请安装 Pillow：
+
+```
+python3 -m pip install pillow
+```
+
+主要能力与参数映射：
+- 窗口标题（传递 `--window-title`）
+- 聊天区域坐标 `x,y,w,h`（传递 `--chat-area`，可结合“预览聊天区域”按钮校准）
+- 滚动方向与限速：`--direction up|down`、`--scroll-delay`、`--max-scrolls`、`--max-scrolls-per-minute`
+- OCR 语言：`--ocr-lang`（默认中文 `ch`）
+- 导出格式：`--formats json,csv,md`（如 CLI 不支持 `txt`，请取消勾选）
+- 输出目录与文件名前缀：`--output`、`--filename-prefix`
+- 其他开关：`--full-fetch`、`--go-top-first`、`--skip-empty`、`--verbose`
+
+提示：
+- 请在“系统设置 → 隐私与安全性”中为终端授予屏幕录制与辅助功能权限。
+- OCR 模型首次加载比较慢属正常现象。
+- 如需使用你本地的 Python 解释器，请将命令中的 `python3` 替换为你的解释器路径。
