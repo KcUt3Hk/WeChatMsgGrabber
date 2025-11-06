@@ -11,21 +11,47 @@
     .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
     .tag { display:inline-block; background:#f4f4f4; border:1px solid #ddd; border-radius:6px; padding:2px 6px; margin-right:6px; font-size:12px; }
     code { background:#f9f9f9; border:1px solid #eee; border-radius:4px; padding:2px 4px; }
+    .banner { background:#fffbe6; border:1px solid #ffe58f; border-radius:8px; padding:10px; margin-top:8px; }
+    .btn { display:inline-block; padding:6px 12px; border-radius:6px; border:1px solid #d9d9d9; background:#f0f0f0; cursor:pointer; font-size:12px; margin-left:8px; }
+    .btn-primary { background:#1677ff; border-color:#1677ff; color:#fff; }
   </style>
+  <script>
+    // 复制文本到剪贴板（用于复制运行命令与依赖安装命令）
+    function copyText(txt) {
+      if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(function() {
+          alert('已复制到剪贴板');
+        }).catch(function(err) {
+          alert('复制失败：' + err);
+        });
+      } else {
+        // 兼容处理：创建临时 textarea 进行复制
+        const ta = document.createElement('textarea');
+        ta.value = txt;
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); alert('已复制到剪贴板'); } catch (e) { alert('复制失败：' + e); }
+        document.body.removeChild(ta);
+      }
+    }
+  </script>
   <!-- 本页用于说明新增的 Tkinter 简易前端 UI 的功能点与运行方式。 -->
 </head>
 <body>
   <div class="header">
     <h1>WeChat OCR 简易前端 UI（说明页面，非可交互应用）</h1>
     <p>该页面仅用于说明与预览，所有操作按钮与标签为静态展示。如需交互操作，请运行桌面应用：<code>ui/simple_gui.py</code>。</p>
+    <div class="banner">
+      <strong>重要提示：</strong>本页不可交互。要使用“开始/停止扫描、框选、复制命令、保存/加载配置”等功能，请在终端运行桌面 UI。
+    </div>
   </div>
 
   <div class="card">
     <h2>运行（桌面应用）</h2>
     <p>在项目根目录运行桌面 UI：</p>
-    <p><code>/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 ui/simple_gui.py</code></p>
+    <p><code>/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 ui/simple_gui.py</code><button class="btn btn-primary" onclick="copyText('/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 ui/simple_gui.py')">复制运行命令</button></p>
     <p>如首次运行提示缺少依赖，请安装 Pillow：</p>
-    <p><code>/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 -m pip install pillow</code></p>
+    <p><code>/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 -m pip install pillow</code><button class="btn" onclick="copyText('/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 -m pip install pillow')">复制安装命令</button></p>
   </div>
 
   <div class="card">
@@ -77,7 +103,7 @@
   </div>
 
   <footer>
-    <small>本页为说明文档，用于在线预览与验证 UI 变更。桌面应用请按上文命令本地运行。</small>
+    <small>本页为说明文档，用于在线预览与验证 UI 变更。桌面应用请按上文命令本地运行；你也可以点击“复制运行命令/安装命令”按钮快速复制到剪贴板。</small>
   </footer>
 </body>
 </html>
