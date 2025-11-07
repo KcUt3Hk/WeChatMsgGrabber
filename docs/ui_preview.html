@@ -3,20 +3,42 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>WeChat OCR 简易前端 UI 预览说明</title>
+  <title>微信聊天导出助手（WeChat Chat Exporter） · 前端预览与配置</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
     .header { margin-bottom: 12px; }
     .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
     .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
     .tag { display:inline-block; background:#f4f4f4; border:1px solid #ddd; border-radius:6px; padding:2px 6px; margin-right:6px; font-size:12px; }
+    .tag.clickable { background:#e6f4ff; border-color:#91caff; color:#0958d9; cursor:pointer; }
+    .tag.clickable:hover { background:#dbeeff; }
     code { background:#f9f9f9; border:1px solid #eee; border-radius:4px; padding:2px 4px; }
     .banner { background:#fffbe6; border:1px solid #ffe58f; border-radius:8px; padding:10px; margin-top:8px; }
     .btn { display:inline-block; padding:6px 12px; border-radius:6px; border:1px solid #d9d9d9; background:#f0f0f0; cursor:pointer; font-size:12px; margin-left:8px; }
     .btn-primary { background:#1677ff; border-color:#1677ff; color:#fff; }
+    /* 表单样式增强 */
+    .form-grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:12px; }
+    .form-row { margin-bottom: 10px; }
+    .form-control { width: 100%; height: 38px; padding: 6px 10px; border: 1px solid #d9d9d9; border-radius: 6px; font-size: 13px; box-sizing: border-box; }
+    select.form-control { height: 38px; }
+    .help { color:#808080; font-size:12px; margin-top:4px; }
+    .section-note { color:#666; font-size:12px; }
+    /* 校验错误样式 */
+    .form-control.error { border-color: #ff4d4f; background: #fff1f0; }
+    .error-msg { color: #cf1322; font-size: 12px; margin-top: 4px; display: none; }
+    .exports-list { margin-top:8px; font-size:13px; }
+    .exports-list li { margin-bottom:4px; }
   </style>
   <script>
-    // 复制文本到剪贴板（用于复制运行命令与依赖安装命令）
+    // 固定 Python 路径（本页仅做演示；真实检测请在桌面 UI 中点击“自动检测”）
+    const PYBIN = '/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12';
+    // 项目根目录（为避免因当前路径不同导致命令执行失败，示例命令使用绝对路径）
+    const PROJECT_ROOT = '/Users/pankkkk/Projects/wechatmsgg';
+    /**
+     * 将文本复制到系统剪贴板
+     * @param {string} txt 要复制的文本
+     * @returns {void}
+     */
     function copyText(txt) {
       if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(txt).then(function() {
@@ -34,16 +56,83 @@
         document.body.removeChild(ta);
       }
     }
+
+    /**
+     * 显示提示信息
+     * @param {string} msg 提示文案
+     * @returns {void}
+     */
+    function showInfo(msg) {
+      alert(msg);
+    }
+
+    /**
+     * 复制自动扫描命令到剪贴板
+     * @returns {void}
+     */
+    function copyScanCommand() {
+      const cmd = `${PYBIN} ${PROJECT_ROOT}/cli/auto_wechat_scan.py --direction up --max-scrolls 60 --max-scrolls-per-minute 40 --formats json,csv --output ${PROJECT_ROOT}/output --filename-prefix auto_wechat_scan --verbose --skip-empty`;
+      copyText(cmd);
+    }
+
+    /**
+     * 复制聊天区域预览命令到剪贴板
+     * @returns {void}
+     */
+    function copyPreviewCommand() {
+      const cmd = `${PYBIN} ${PROJECT_ROOT}/scripts/capture_rect_preview.py --rect 120,80,920,900 --out ${PROJECT_ROOT}/outputs/debug_chat_area_preview.png`;
+      copyText(cmd);
+    }
+
+    /**
+     * 复制打开输出目录命令到剪贴板（macOS）
+     * @returns {void}
+     */
+    function copyOpenOutput() {
+      copyText(`open ${PROJECT_ROOT}/output`);
+    }
+
+    /**
+     * 复制配置模板（JSON）到剪贴板
+     * @returns {void}
+     */
+    function copyConfigTemplate() {
+      const tpl = {
+        app: { scroll_speed: 2, scroll_delay: 1.0, max_retry_attempts: 3 },
+        ocr: { language: 'ch', confidence_threshold: 0.7 },
+        output: { format: 'json', directory: './output', enable_deduplication: true, formats: ['json','csv'] }
+      };
+      copyText(JSON.stringify(tpl, null, 2));
+      alert('已复制配置模板到剪贴板');
+    }
+
+    /**
+     * 复制当前示例 Python 解释器路径到剪贴板
+     * @returns {void}
+     */
+    function copyPythonPath() {
+      copyText(PYBIN);
+    }
   </script>
-  <!-- 本页用于说明新增的 Tkinter 简易前端 UI 的功能点与运行方式。 -->
+  <!-- 本页用于说明新增的 Tkinter 简易前端 UI 的功能点与运行方式，同时支持通过本地配置服务进行参数编辑与保存。 -->
 </head>
 <body>
   <div class="header">
-    <h1>WeChat OCR 简易前端 UI（说明页面，非可交互应用）</h1>
-    <p>该页面仅用于说明与预览，所有操作按钮与标签为静态展示。如需交互操作，请运行桌面应用：<code>ui/simple_gui.py</code>。</p>
+    <h1>微信聊天导出助手（WeChat Chat Exporter） · 前端预览与交互配置</h1>
+    <p>该页面主要用于说明与预览；当启动本地配置服务 <code>web/config_server.py</code> 后，本页将支持“参数设置（交互）”并可直接保存到项目。</p>
     <div class="banner">
-      <strong>重要提示：</strong>本页不可交互。要使用“开始/停止扫描、框选、复制命令、保存/加载配置”等功能，请在终端运行桌面 UI。
+      <strong>交互说明：</strong>如需在页面上直接保存/加载配置，请先启动本地配置服务；若未启动服务，交互配置区的按钮将提示失败。
     </div>
+  </div>
+
+  <div class="card">
+    <h2>启动配置服务（Web）</h2>
+    <p>在项目根目录运行本地配置服务（同端口提供静态页面与 API）：</p>
+    <p>
+      <code>/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 web/config_server.py --port 8003</code>
+      <button class="btn btn-primary" onclick="copyText('/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 web/config_server.py --port 8003')">复制运行命令</button>
+    </p>
+    <p>启动成功后，打开：<code>http://localhost:8003/ui_preview.html</code> 即可使用本页的“参数设置（交互）”。</p>
   </div>
 
   <div class="card">
@@ -55,10 +144,20 @@
   </div>
 
   <div class="card">
+    <h2>如何确定 Python 路径（macOS）</h2>
+    <ul>
+      <li>方法一（推荐）：在桌面 UI 中点击“自动检测”，会自动回填当前解释器路径。</li>
+      <li>方法二：在终端执行 <code>python3 -c "import sys; print(sys.executable)"</code>，输出即为解释器路径。</li>
+      <li>方法三：在终端执行 <code>which python3</code>，适用于 Homebrew 安装的 Python。</li>
+    </ul>
+  </div>
+
+  <div class="card">
     <h2>核心功能</h2>
     <div class="grid">
       <div>
         <h3>参数设置</h3>
+        <span class="tag">Python 解释器路径（可修改/自动检测）</span>
         <span class="tag">窗口标题</span>
         <span class="tag">聊天区域 x,y,w,h</span>
         <span class="tag">方向 up/down</span>
@@ -74,17 +173,119 @@
       </div>
       <div>
         <h3>操作</h3>
-        <span class="tag">预览聊天区域</span>
-        <span class="tag">框选聊天区域</span>
-        <span class="tag">开始扫描</span>
-        <span class="tag">停止扫描</span>
-        <span class="tag">复制命令</span>
-        <span class="tag">保存配置</span>
-        <span class="tag">加载配置</span>
-        <span class="tag">打开输出目录</span>
-        <span class="tag">退出</span>
+        <span class="tag clickable" title="复制当前 Python 路径到剪贴板" onclick="copyPythonPath()">自动检测 Python 路径</span>
+        <span class="tag clickable" title="复制预览截图命令" onclick="copyPreviewCommand()">预览聊天区域</span>
+        <span class="tag clickable" title="在桌面 UI 中执行框选" onclick="showInfo('请在桌面 UI 中点击“框选聊天区域”，然后在屏幕上拖拽选择区域。该页面为说明用途，不提供真实框选。')">框选聊天区域</span>
+        <span class="tag clickable" title="复制扫描运行命令" onclick="copyScanCommand()">开始扫描</span>
+        <span class="tag clickable" title="在桌面 UI 中停止扫描" onclick="showInfo('请在桌面 UI 中点击“停止扫描”，终止当前任务。该页面为说明用途，不提供进程控制。')">停止扫描</span>
+        <span class="tag clickable" title="复制当前示例命令" onclick="copyScanCommand()">复制命令</span>
+        <span class="tag clickable" title="复制配置模板到剪贴板" onclick="copyConfigTemplate()">保存配置</span>
+        <span class="tag clickable" title="在桌面 UI 中加载配置" onclick="showInfo('请在桌面 UI 中点击“加载配置”，从项目根目录 ui_config.json 回填设置。')">加载配置</span>
+        <span class="tag clickable" title="复制打开输出目录命令" onclick="copyOpenOutput()">打开输出目录</span>
+        <span class="tag clickable" title="桌面 UI 中退出程序" onclick="showInfo('请在桌面 UI 中点击“退出”按钮以关闭程序。')">退出</span>
       </div>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>参数设置（交互）</h2>
+    <p>以下表单可与本地配置服务联动，支持“加载配置”与“保存到项目”，会写入项目根目录的 <code>ui_config.json</code> 与 <code>config.json</code>。</p>
+    <div class="form-grid">
+      <div class="form-row">
+        <label>Python 解释器路径</label><br />
+        <input id="f_python_bin" class="form-control" placeholder="如 /Users/.../python3.12" />
+        <div class="help">建议使用绝对路径；也可在桌面 UI 点击“自动检测”获取当前解释器路径。</div>
+      </div>
+      <div class="form-row">
+        <label>窗口标题</label><br />
+        <input id="f_window_title" class="form-control" placeholder="如 WeChat/微信" />
+        <div class="help">用于对齐目标窗口；若留空，默认由桌面 UI 自行识别或使用系统前台窗口。</div>
+      </div>
+      <div class="form-row">
+        <label>聊天区域 (x,y,w,h)</label><br />
+        <input id="f_chat_area" class="form-control" placeholder="例如 260,65,873,1211" />
+        <div class="help">坐标格式为 x,y,w,h；区域需覆盖消息列表，建议 w/h ≥ 200。可在桌面 UI 通过“框选聊天区域”完成精确选择。</div>
+      </div>
+      <div class="form-row">
+        <label>滚动方向</label><br />
+        <select id="f_direction" class="form-control">
+          <option value="up">up</option>
+          <option value="down">down</option>
+        </select>
+        <div class="help">向上/向下滚动；结合“go-top-first”可先回到顶部再执行扫描。</div>
+      </div>
+      <div class="form-row">
+        <label>scroll-delay（秒）</label><br />
+        <input id="f_scroll_delay" class="form-control" placeholder="例如 1.0" />
+        <div class="help">每次滚动后的等待时间，过低可能导致 OCR 读取不稳定；推荐 0.8～1.2。</div>
+      </div>
+      <div class="form-row">
+        <label>max-scrolls</label><br />
+        <input id="f_max_scrolls" class="form-control" placeholder="例如 60" />
+        <div class="help">本次任务最多滚动次数，用于限制任务时长；设为较大值适合全量扫描。</div>
+      </div>
+      <div class="form-row">
+        <label>max-scrolls-per-minute（spm）</label><br />
+        <input id="f_max_spm" class="form-control" placeholder="例如 40" />
+        <div class="help">每分钟允许的最大滚动次数，用于限速防止封禁风险与页面抖动。</div>
+      </div>
+      <div class="form-row">
+        <label>OCR 语言</label><br />
+        <input id="f_ocr_lang" class="form-control" placeholder="例如 ch" />
+        <div class="help">默认中文（ch）；如需英文请填写 en；多语言可根据实际 OCR 模型支持进行配置。</div>
+      </div>
+      <div class="form-row">
+        <label>输出目录</label><br />
+        <input id="f_output_dir" class="form-control" placeholder="例如 /Users/.../output" />
+        <div class="help">建议使用绝对路径；桌面 UI 会在任务启动前自动创建/校验可写性。</div>
+      </div>
+      <div class="form-row">
+        <label>文件前缀</label><br />
+        <input id="f_filename_prefix" class="form-control" placeholder="例如 auto_wechat_scan" />
+        <div class="help">输出文件名的前缀，用于区分不同任务与时间段。</div>
+      </div>
+      <div class="form-row">
+        <label>导出格式</label><br />
+        <label title="导出为 JSON"><input type="checkbox" id="fmt_json" /> json</label>
+        <label title="导出为 CSV" style="margin-left:8px;"><input type="checkbox" id="fmt_csv" /> csv</label>
+        <label title="导出为 Markdown" style="margin-left:8px;"><input type="checkbox" id="fmt_md" /> md</label>
+        <div class="help">可多选；保存时将选择第一个勾选项作为默认主格式写入 config.json。</div>
+      </div>
+      <div class="form-row">
+        <label>选项</label><br />
+        <label title="首次回到历史顶部，然后进行全量覆盖扫描"><input type="checkbox" id="f_full_fetch" /> full-fetch</label>
+        <label title="任务开始时先滚动至顶部，以提升扫描稳定性" style="margin-left:8px;"><input type="checkbox" id="f_go_top_first" /> go-top-first</label>
+        <label title="跳过空消息或系统提示类消息" style="margin-left:8px;"><input type="checkbox" id="f_skip_empty" checked /> skip-empty</label>
+        <label title="输出更详细的日志，便于调试定位问题" style="margin-left:8px;"><input type="checkbox" id="f_verbose" checked /> verbose</label>
+        <div class="help">说明：
+          <span class="section-note">full-fetch 适合首次全量构建，耗时较长；go-top-first 适合从顶部开始，避免遗漏最早消息；skip-empty 跳过空白/系统类消息；verbose 会打印更多调试信息。</span>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:12px;">
+      <button class="btn" onclick="loadConfigFromServer()">加载配置</button>
+      <button class="btn btn-primary" onclick="saveConfigToServer()">保存到项目</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>最新导出（来自配置服务）</h2>
+    <p>点击按钮从配置服务查询 <code>output/</code> 与 <code>outputs/</code> 目录中最新的导出文件（按修改时间倒序）。</p>
+    <div>
+      <button class="btn" onclick="fetchLatestExports(10)">查看最新导出（10条）</button>
+      <button class="btn" onclick="fetchLatestExports(20)">查看最新导出（20条）</button>
+    </div>
+    <div style="margin:8px 0;">
+      <label>筛选</label>
+      <input type="text" id="latest_filter" placeholder="输入关键字过滤（按文件名）" style="width:240px;" oninput="setLatestFilter(this.value)" />
+      <span style="margin-left:12px;">排序</span>
+      <button class="btn" onclick="setLatestSort('mtime','desc')">按时间（新→旧）</button>
+      <button class="btn" onclick="setLatestSort('mtime','asc')">按时间（旧→新）</button>
+      <button class="btn" onclick="setLatestSort('name','asc')">按名称（A→Z）</button>
+      <button class="btn" onclick="setLatestSort('name','desc')">按名称（Z→A）</button>
+    </div>
+      <div class="help">说明：查询成功后，列表中的每个条目都提供“复制路径”“复制文件名”“访达中显示”“打开文件”四个操作按钮，便于快速定位或打开文件；桌面版“最新导出列表”窗口也支持同类能力（右键菜单与快捷键：Enter 打开、Cmd/Ctrl+C 复制路径、Cmd/Ctrl+Shift+C 复制文件名）。</div>
+    <div id="latest_exports_area" class="exports-list"></div>
   </div>
 
   <div class="card">
@@ -93,17 +294,491 @@
       <li>请在“系统设置 → 隐私与安全性”中授予屏幕录制与辅助功能权限。</li>
       <li>首次加载 OCR 模型耗时较长属正常现象。</li>
       <li>如 auto_wechat_scan.py 不支持 txt 格式，请取消勾选 txt。</li>
+      <li>命令复制与页面示例均使用绝对路径，减少在不同当前目录下执行失败的概率。</li>
+      <li>桌面 UI 会在启动扫描前自动创建/校验输出目录可写性；预览/框选功能需要屏幕录制权限。</li>
+      <li>在框选窗口中可按 <code>Esc</code> 快速取消并关闭框选窗口。</li>
+      <li>“停止扫描”在终止超时时会进行强制结束，避免僵尸进程影响后续任务。</li>
     </ul>
   </div>
 
   <div class="card">
     <h2>文件位置</h2>
     <p>UI 源码：<code>ui/simple_gui.py</code></p>
-    <p>预览脚本：<code>scripts/capture_rect_preview.py</code></p>
+    <p>预览脚本（供 CLI 使用）：<code>scripts/capture_rect_preview.py</code></p>
+    <div class="banner"><strong>说明：</strong>桌面 UI 的“预览聊天区域”已采用内置截屏实现（Pillow 的 ImageGrab），不依赖上述脚本；脚本仍可用于命令行场景。</div>
   </div>
 
   <footer>
     <small>本页为说明文档，用于在线预览与验证 UI 变更。桌面应用请按上文命令本地运行；你也可以点击“复制运行命令/安装命令”按钮快速复制到剪贴板。</small>
   </footer>
+  <script>
+    /**
+     * 收集交互表单数据为 ui_config.json 结构
+     * @returns {Object} UI 配置字典
+     */
+    function collectUiConfig() {
+      return {
+        python_bin: document.getElementById('f_python_bin').value.trim(),
+        window_title: document.getElementById('f_window_title').value.trim(),
+        chat_area: document.getElementById('f_chat_area').value.trim(),
+        direction: document.getElementById('f_direction').value,
+        scroll_delay: document.getElementById('f_scroll_delay').value.trim(),
+        max_scrolls: document.getElementById('f_max_scrolls').value.trim(),
+        max_spm: document.getElementById('f_max_spm').value.trim(),
+        ocr_lang: document.getElementById('f_ocr_lang').value.trim(),
+        output_dir: document.getElementById('f_output_dir').value.trim(),
+        filename_prefix: document.getElementById('f_filename_prefix').value.trim(),
+        full_fetch: document.getElementById('f_full_fetch').checked,
+        go_top_first: document.getElementById('f_go_top_first').checked,
+        skip_empty: document.getElementById('f_skip_empty').checked,
+        verbose: document.getElementById('f_verbose').checked,
+        formats: {
+          json: document.getElementById('fmt_json').checked,
+          csv: document.getElementById('fmt_csv').checked,
+          md: document.getElementById('fmt_md').checked,
+        },
+      };
+    }
+
+    /**
+     * 将服务返回的 ui_config.json 数据回填到表单
+     * @param {Object} data 服务返回的数据对象
+     * @returns {void}
+     */
+    function fillUiForm(data) {
+      document.getElementById('f_python_bin').value = data.python_bin || document.getElementById('f_python_bin').value;
+      document.getElementById('f_window_title').value = data.window_title || '';
+      document.getElementById('f_chat_area').value = data.chat_area || '';
+      document.getElementById('f_direction').value = data.direction || 'up';
+      document.getElementById('f_scroll_delay').value = data.scroll_delay || '';
+      document.getElementById('f_max_scrolls').value = data.max_scrolls || '';
+      document.getElementById('f_max_spm').value = data.max_spm || '';
+      document.getElementById('f_ocr_lang').value = data.ocr_lang || 'ch';
+      document.getElementById('f_output_dir').value = data.output_dir || '';
+      document.getElementById('f_filename_prefix').value = data.filename_prefix || 'auto_wechat_scan';
+      const fmts = data.formats || {}; 
+      document.getElementById('fmt_json').checked = !!fmts.json;
+      document.getElementById('fmt_csv').checked = !!fmts.csv;
+      document.getElementById('fmt_md').checked = !!fmts.md;
+      document.getElementById('f_full_fetch').checked = !!data.full_fetch;
+      document.getElementById('f_go_top_first').checked = !!data.go_top_first;
+      document.getElementById('f_skip_empty').checked = data.skip_empty !== undefined ? !!data.skip_empty : true;
+      document.getElementById('f_verbose').checked = data.verbose !== undefined ? !!data.verbose : true;
+    }
+
+    /**
+     * 设置字段错误样式与提示
+     * @param {string} inputId 输入框ID
+     * @param {string} msg 错误消息
+     */
+    function setFieldError(inputId, msg) {
+      const el = document.getElementById(inputId);
+      if (!el) return;
+      el.classList.add('error');
+      // 若不存在错误提示节点，创建一个
+      let err = el.nextElementSibling;
+      // 跳过说明 .help
+      if (err && err.classList && err.classList.contains('help')) {
+        // 在说明后插入错误节点
+        const newErr = document.createElement('div');
+        newErr.className = 'error-msg';
+        newErr.textContent = msg;
+        el.parentElement.appendChild(newErr);
+        newErr.style.display = 'block';
+        return;
+      }
+      if (!err || !(err.classList && err.classList.contains('error-msg'))) {
+        err = document.createElement('div');
+        err.className = 'error-msg';
+        el.parentNode.insertBefore(err, el.nextSibling);
+      }
+      err.textContent = msg;
+      err.style.display = 'block';
+    }
+
+    /**
+     * 清除字段错误样式与提示
+     * @param {string} inputId 输入框ID
+     */
+    function clearFieldError(inputId) {
+      const el = document.getElementById(inputId);
+      if (!el) return;
+      el.classList.remove('error');
+      const errCandidate = el.nextElementSibling;
+      if (errCandidate && errCandidate.classList && errCandidate.classList.contains('error-msg')) {
+        errCandidate.style.display = 'none';
+      }
+      // 同时隐藏后续可能插入的错误节点
+      const siblings = el.parentElement.querySelectorAll('.error-msg');
+      siblings.forEach(function(n){ n.style.display='none'; });
+    }
+
+    /**
+     * 表单校验：必要项与格式合法性
+     * @returns {{ok:boolean, errors:string[]}}
+     */
+    function validateUiForm() {
+      const errors = [];
+      // 需校验的字段：python_bin、chat_area、scroll_delay、max_scrolls、max_spm、output_dir
+      const py = document.getElementById('f_python_bin').value.trim();
+      clearFieldError('f_python_bin');
+      if (!py) { setFieldError('f_python_bin', 'Python 解释器路径不能为空'); errors.push('python_bin'); }
+
+      const chat = document.getElementById('f_chat_area').value.trim();
+      clearFieldError('f_chat_area');
+      if (chat) {
+        const parts = chat.split(',').map(function(s){return s.trim();});
+        if (parts.length !== 4) {
+          setFieldError('f_chat_area', '坐标格式必须为 x,y,w,h（四个整数，逗号分隔）'); errors.push('chat_area');
+        } else {
+          const nums = parts.map(function(p){return parseInt(p, 10);});
+          const valid = nums.every(function(n){return Number.isFinite(n) && n >= 0;}) && nums[2] > 3 && nums[3] > 3;
+          if (!valid) {
+            setFieldError('f_chat_area', '坐标必须为非负整数，且 w/h > 3'); errors.push('chat_area');
+          }
+        }
+      }
+
+      const sd = document.getElementById('f_scroll_delay').value.trim();
+      clearFieldError('f_scroll_delay');
+      if (sd) {
+        const v = parseFloat(sd);
+        if (!Number.isFinite(v) || v <= 0 || v > 10) {
+          setFieldError('f_scroll_delay', 'scroll-delay 必须为 (0, 10] 的数字'); errors.push('scroll_delay');
+        }
+      }
+
+      const ms = document.getElementById('f_max_scrolls').value.trim();
+      clearFieldError('f_max_scrolls');
+      if (ms) {
+        const v = parseInt(ms, 10);
+        if (!Number.isFinite(v) || v < 0 || v > 10000) {
+          setFieldError('f_max_scrolls', 'max-scrolls 必须为 0~10000 的整数'); errors.push('max_scrolls');
+        }
+      }
+
+      const spm = document.getElementById('f_max_spm').value.trim();
+      clearFieldError('f_max_spm');
+      if (spm) {
+        const v = parseInt(spm, 10);
+        if (!Number.isFinite(v) || v <= 0 || v > 200) {
+          setFieldError('f_max_spm', 'spm 必须为 1~200 的整数'); errors.push('max_spm');
+        }
+      }
+
+      const outdir = document.getElementById('f_output_dir').value.trim();
+      clearFieldError('f_output_dir');
+      if (!outdir) { setFieldError('f_output_dir', '输出目录不能为空'); errors.push('output_dir'); }
+
+      return { ok: errors.length === 0, errors: errors };
+    }
+
+    /**
+     * 针对单字段进行实时校验并更新错误提示
+     * @param {string} fieldId 输入框 ID（例如 f_python_bin）
+     * @returns {boolean} 是否通过校验
+     */
+    function validateField(fieldId) {
+      let ok = true;
+      switch (fieldId) {
+        case 'f_python_bin': {
+          const v = document.getElementById('f_python_bin').value.trim();
+          clearFieldError('f_python_bin');
+          if (!v) { setFieldError('f_python_bin', 'Python 解释器路径不能为空'); ok = false; }
+          break;
+        }
+        case 'f_chat_area': {
+          const chat = document.getElementById('f_chat_area').value.trim();
+          clearFieldError('f_chat_area');
+          if (chat) {
+            const parts = chat.split(',').map(function(s){return s.trim();});
+            if (parts.length !== 4) {
+              setFieldError('f_chat_area', '坐标格式必须为 x,y,w,h（四个整数，逗号分隔）'); ok = false;
+            } else {
+              const nums = parts.map(function(p){return parseInt(p, 10);});
+              const valid = nums.every(function(n){return Number.isFinite(n) && n >= 0;}) && nums[2] > 3 && nums[3] > 3;
+              if (!valid) { setFieldError('f_chat_area', '坐标必须为非负整数，且 w/h > 3'); ok = false; }
+            }
+          }
+          break;
+        }
+        case 'f_scroll_delay': {
+          const sd = document.getElementById('f_scroll_delay').value.trim();
+          clearFieldError('f_scroll_delay');
+          if (sd) {
+            const v = parseFloat(sd);
+            if (!Number.isFinite(v) || v <= 0 || v > 10) { setFieldError('f_scroll_delay', 'scroll-delay 必须为 (0, 10] 的数字'); ok = false; }
+          }
+          break;
+        }
+        case 'f_max_scrolls': {
+          const ms = document.getElementById('f_max_scrolls').value.trim();
+          clearFieldError('f_max_scrolls');
+          if (ms) {
+            const v = parseInt(ms, 10);
+            if (!Number.isFinite(v) || v < 0 || v > 10000) { setFieldError('f_max_scrolls', 'max-scrolls 必须为 0~10000 的整数'); ok = false; }
+          }
+          break;
+        }
+        case 'f_max_spm': {
+          const spm = document.getElementById('f_max_spm').value.trim();
+          clearFieldError('f_max_spm');
+          if (spm) {
+            const v = parseInt(spm, 10);
+            if (!Number.isFinite(v) || v <= 0 || v > 200) { setFieldError('f_max_spm', 'spm 必须为 1~200 的整数'); ok = false; }
+          }
+          break;
+        }
+        case 'f_output_dir': {
+          const outdir = document.getElementById('f_output_dir').value.trim();
+          clearFieldError('f_output_dir');
+          if (!outdir) { setFieldError('f_output_dir', '输出目录不能为空'); ok = false; }
+          break;
+        }
+        default:
+          break;
+      }
+      return ok;
+    }
+
+    /**
+     * 绑定实时校验事件：input/blur 时针对单字段校验
+     * @returns {void}
+     */
+    function bindRealtimeValidation() {
+      var ids = ['f_python_bin','f_chat_area','f_scroll_delay','f_max_scrolls','f_max_spm','f_output_dir'];
+      ids.forEach(function(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        // 输入过程中实时校验但不打断
+        el.addEventListener('input', function() { validateField(id); });
+        // 失焦时再次校验，确保错误提示准确显示
+        el.addEventListener('blur', function() { validateField(id); });
+      });
+    }
+
+    /**
+     * 从本地配置服务加载配置（GET /api/load-config）
+     * @returns {Promise<void>}
+     */
+    async function loadConfigFromServer() {
+      try {
+        const resp = await fetch('/api/load-config', { method: 'GET' });
+        const data = await resp.json();
+        if (data && data.ok && data.data) {
+          fillUiForm(data.data);
+          alert('已加载配置并回填');
+        } else {
+          alert('加载配置失败：' + (data && data.message ? data.message : '请确认服务已启动'));
+        }
+      } catch (err) {
+        alert('加载配置失败：' + err);
+      }
+    }
+
+    /**
+     * 保存表单为项目配置（POST /api/save-config）
+     * @returns {Promise<void>}
+     */
+    async function saveConfigToServer() {
+      const payload = collectUiConfig();
+      const chk = validateUiForm();
+      if (!chk.ok) {
+        alert('请修正表单错误后再保存（红框字段）');
+        return;
+      }
+      try {
+        const resp = await fetch('/api/save-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (data && data.ok) {
+          alert('配置已保存到项目：\n- ' + (data.paths && data.paths.ui ? data.paths.ui : 'ui_config.json') + '\n- ' + (data.paths && data.paths.cli ? data.paths.cli : 'config.json'));
+        } else {
+          alert('保存失败：' + (data && data.message ? data.message : '请确认服务已启动'));
+        }
+      } catch (err) {
+        alert('保存失败：' + err);
+      }
+    }
+
+    /**
+     * 拉取最新导出文件列表并渲染到页面
+     * @param {number} limit 条数上限
+     * @returns {Promise<void>}
+     */
+    async function fetchLatestExports(limit) {
+      const area = document.getElementById('latest_exports_area');
+      area.innerHTML = '<em>查询中…</em>';
+      try {
+        const resp = await fetch('/api/latest-exports?limit=' + (limit || 20), { method: 'GET' });
+        const data = await resp.json();
+        if (!data || !data.ok) {
+          area.innerHTML = '<span style="color:#cf1322">查询失败：' + (data && data.message ? data.message : '请确认配置服务已启动') + '</span>';
+          return;
+        }
+        // 记录原始数据到全局状态，便于排序与筛选
+        window.LATEST_EXPORTS_STATE = window.LATEST_EXPORTS_STATE || { raw: null, sort: { key: 'mtime', order: 'desc' }, filter: '' };
+        window.LATEST_EXPORTS_STATE.raw = data;
+        renderLatestExports(data);
+      } catch (e) {
+        area.innerHTML = '<span style="color:#cf1322">查询失败：' + e + '</span>';
+      }
+    }
+
+    /**
+     * 设置“最新导出”列表的排序规则并重新渲染
+     * @param {('name'|'mtime')} key 排序字段
+     * @param {('asc'|'desc')} order 排序方向
+     */
+    function setLatestSort(key, order) {
+      window.LATEST_EXPORTS_STATE = window.LATEST_EXPORTS_STATE || { raw: null, sort: { key: 'mtime', order: 'desc' }, filter: '' };
+      window.LATEST_EXPORTS_STATE.sort = { key: key, order: order };
+      const raw = window.LATEST_EXPORTS_STATE.raw;
+      if (raw) { renderLatestExports(raw); }
+    }
+
+    /**
+     * 设置“最新导出”列表的筛选关键字（按文件名包含）
+     * @param {string} text 关键字
+     */
+    function setLatestFilter(text) {
+      window.LATEST_EXPORTS_STATE = window.LATEST_EXPORTS_STATE || { raw: null, sort: { key: 'mtime', order: 'desc' }, filter: '' };
+      window.LATEST_EXPORTS_STATE.filter = String(text || '').trim();
+      const raw = window.LATEST_EXPORTS_STATE.raw;
+      if (raw) { renderLatestExports(raw); }
+    }
+
+    /**
+     * 根据当前状态对 /api/latest-exports 返回的数据进行排序与筛选
+     * @param {Object} data 原始数据对象（含 data.output 与 data.outputs）
+     * @returns {{output: Array, outputs: Array}} 变换后的两个列表
+     */
+    function transformLatestExports(data) {
+      const state = window.LATEST_EXPORTS_STATE || { sort: { key: 'mtime', order: 'desc' }, filter: '' };
+      const sortKey = (state.sort && state.sort.key) || 'mtime';
+      const sortOrder = (state.sort && state.sort.order) || 'desc';
+      const keyword = (state.filter || '').toLowerCase();
+
+      /**
+       * 内部助手：复制并应用筛选与排序
+       * @param {Array} arr 原始条目数组
+       * @returns {Array} 处理后的数组
+       */
+      function apply(arr) {
+        const copy = Array.isArray(arr) ? arr.slice() : [];
+        const filtered = keyword
+          ? copy.filter(function(x){ return String(x.name || '').toLowerCase().includes(keyword); })
+          : copy;
+        filtered.sort(function(a, b){
+          var va = a[sortKey]; var vb = b[sortKey];
+          if (sortKey === 'name') {
+            va = String(va || ''); vb = String(vb || '');
+            const cmp = va.localeCompare(vb);
+            return sortOrder === 'asc' ? cmp : -cmp;
+          } else {
+            // mtime 可能为 null 或 undefined
+            va = (typeof va === 'number') ? va : -Infinity;
+            vb = (typeof vb === 'number') ? vb : -Infinity;
+            return sortOrder === 'asc' ? (va - vb) : (vb - va);
+          }
+        });
+        return filtered;
+      }
+
+      const d = data.data || {};
+      return { output: apply(d.output || []), outputs: apply(d.outputs || []) };
+    }
+
+    /**
+     * 渲染最新导出结果
+     * @param {Object} data /api/latest-exports 返回数据
+     */
+    function renderLatestExports(data) {
+      const area = document.getElementById('latest_exports_area');
+      const d = transformLatestExports(data);
+      const root = data.root || '';
+      const limit = data.limit || 20;
+      let html = '';
+      function renderSection(title, list) {
+        html += '<h3 style="margin:6px 0">' + title + '</h3>';
+        if (!list || list.length === 0) {
+          html += '<div class="help">(无文件或目录不存在)</div>';
+          return;
+        }
+        html += '<ul>';
+        list.forEach(function(item){
+          const p = item.path || '';
+          const name = item.name || '';
+          const m = item.mtime_str || '';
+          const safePath = p.replace(/'/g, "\\'");
+          const safeName = name.replace(/'/g, "\\'");
+          html += '<li>' + name + ' <span class="help">' + m + '</span>' +
+                  ' <button class="btn" onclick="copyText(\'' + safePath + '\')">复制路径</button>' +
+                  ' <button class="btn" onclick="copyText(\'' + safeName + '\')">复制文件名</button>' +
+                  ' <button class="btn" onclick="openInFinder(\'' + safePath + '\')">访达中显示</button>' +
+                  ' <button class="btn" onclick="openFile(\'' + safePath + '\')">打开文件</button>' +
+                  '</li>';
+        });
+        html += '</ul>';
+      }
+      html += '<div class="help">根目录：' + root + '，展示上限：' + limit + '</div>';
+      renderSection('output/', d.output);
+      renderSection('outputs/', d.outputs);
+      area.innerHTML = html;
+    }
+
+    /**
+     * 在 macOS Finder 中显示文件（reveal）
+     * @param {string} path 文件绝对路径
+     */
+    async function openInFinder(path) {
+      try {
+        const resp = await fetch('/api/open-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: path, action: 'reveal' }),
+        });
+        const data = await resp.json();
+        if (!data.ok) {
+          alert('操作失败：' + (data.message || '未知错误'));
+        }
+      } catch (e) {
+        alert('操作失败：' + e);
+      }
+    }
+
+    /**
+     * 直接打开文件或目录（macOS）
+     * @param {string} path 文件绝对路径
+     */
+    async function openFile(path) {
+      try {
+        const resp = await fetch('/api/open-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: path, action: 'open' }),
+        });
+        const data = await resp.json();
+        if (!data.ok) {
+          alert('操作失败：' + (data.message || '未知错误'));
+        }
+      } catch (e) {
+        alert('操作失败：' + e);
+      }
+    }
+
+    // 页面加载后回填示例解释器路径，便于快速保存
+    document.addEventListener('DOMContentLoaded', function() {
+      const py = document.getElementById('f_python_bin');
+      if (py && (!py.value || py.value.trim().length === 0)) {
+        py.value = PYBIN;
+      }
+      // 绑定实时校验事件
+      bindRealtimeValidation();
+    });
+  </script>
 </body>
 </html>

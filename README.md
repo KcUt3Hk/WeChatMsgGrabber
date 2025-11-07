@@ -1,4 +1,4 @@
-# WeChat 消息提取器（wechatmsgg）
+# 微信聊天导出助手（WeChat Chat Exporter）
 
 一个自动化从微信窗口截屏、OCR识别并解析为结构化消息的工具集，包含：
 - 自动滚动控制（AutoScrollController / AdvancedScrollController）
@@ -569,9 +569,124 @@ python3 -m pip install pillow
 - 框选聊天区域：通过屏幕截图 + 拖拽选择区域，自动回填坐标到输入框。
 - 停止扫描：终止正在运行的扫描任务，恢复“开始扫描”按钮为可点击状态。
 - 复制命令：将当前参数构建的 CLI 命令复制到剪贴板，便于在终端执行或集成脚本。
-- 保存/加载配置：将 UI 参数保存到项目根目录 `ui_config.json`，并可一键回填恢复。
+- 保存/加载配置：将 UI 参数保存到项目根目录 `ui_config.json`，并可一键回填恢复；同时生成 `config.json`（结构为 app/ocr/output），CLI 将自动读取该文件作为默认配置。
+ - 查看最新导出：调用辅助脚本 `scripts/list_latest_exports.py`，在日志区快速显示 `output/` 与 `outputs/` 目录中的最新导出文件（默认展示 10 条，绝对路径）。
+ - 最新导出列表（小窗）：新增独立窗口（Toplevel + Treeview）更直观地浏览最新导出文件（含 output/ 与 outputs/）。功能包括：
+   - 右键菜单：打开文件、访达中显示、复制路径、复制文件名；
+   - 列头排序：按文件名/修改时间/路径排序，点击切换升降序；刷新后保持上次排序状态；
+   - 双击打开：双击列表项直接打开文件；
+   - 数据来源：优先使用 GET `/api/latest-exports`，失败时自动回退到本地脚本 `scripts/list_latest_exports.py`。
+
+补充：Python 解释器路径
+- UI 新增“Python 解释器路径”输入框与“自动检测”按钮，构建与复制命令时会优先使用该路径。
+- 在 macOS 终端也可运行：
+  - `python3 -c "import sys; print(sys.executable)"` 获取当前解释器绝对路径；
+  - `which python3` 查看 Homebrew 安装路径。
+ - 若你已在项目使用固定路径（例如 `/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12`），可以直接填入并保存到 UI 配置。
 
 提示：
 - 请在“系统设置 → 隐私与安全性”中为终端授予屏幕录制与辅助功能权限。
 - OCR 模型首次加载比较慢属正常现象。
 - 如需使用你本地的 Python 解释器，请将命令中的 `python3` 替换为你的解释器路径。
+ - 桌面 UI 对命令复制进行了安全转义，并在启动扫描前自动创建/校验输出目录；框选窗口支持按 `Esc` 取消；终止扫描支持超时后的强制结束。
+
+### Web 交互配置（在页面上直接保存到代码）
+
+如果你希望直接在页面上配置参数并保存到项目中，可使用本地配置服务：
+
+1) 启动本地配置服务（提供静态页面与 API）：
+
+```
+/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 web/config_server.py --port 8003
+```
+
+2) 打开浏览器访问：
+
+```
+http://localhost:8003/ui_preview.html
+```
+
+3) 在页面的“参数设置（交互）”卡片中：
+- 点击“加载配置”从项目根目录读取 `ui_config.json` 并回填；
+- 点击“保存到项目”将表单保存到 `ui_config.json`，并自动生成 CLI 使用的 `config.json`（结构包含 `app/ocr/output`）。
+
+说明：
+- 页面顶部同时保留“运行（桌面应用）”命令，实际扫描请使用 `ui/simple_gui.py`；
+- 如果未启动配置服务，页面的保存/加载会提示失败；
+- 该服务仅运行在本地开发环境，默认静态目录为 `docs/`，API 路由为 `/api/save-config` 与 `/api/load-config`。
+## 简易桌面 UI（Tkinter）与本地配置服务（Web）
+
+为降低上手成本，项目提供一个 Tkinter 桌面 UI 与一个轻量本地配置服务（同时提供静态页面与 API）。它们相互协作，帮助你在图形界面中设置参数、保存/加载配置，并快速定位导出文件。
+
+### 启动本地配置服务
+
+在项目根目录运行（静态页面目录为 `docs/`，API 包含保存/加载配置、查询最新导出、打开/显示文件等）：
+
+```
+/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 web/config_server.py --port 8003
+```
+
+启动成功后，打开网页交互预览：
+
+```
+http://localhost:8003/ui_preview.html
+```
+
+提示：若出现“地址已被占用（Address already in use）”错误，说明端口 8003 已被占用。可选择备用端口启动，例如：
+
+```
+/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 web/config_server.py --port 8004
+```
+然后访问：`http://localhost:8004/ui_preview.html`
+
+网页端功能概览：
+- 参数设置（交互表单）：可直接“加载配置（GET /api/load-config）/保存到项目（POST /api/save-config）”；
+- 最新导出：查询 `output/` 与 `outputs/` 中最新文件（GET `/api/latest-exports?limit=20`），并支持“复制路径”“复制文件名”“访达中显示”“打开文件”（POST `/api/open-path`）；
+- 轻量排序与筛选（前端）：在“最新导出”卡片顶部提供筛选输入框与排序按钮；支持按文件名关键字筛选、按修改时间/名称的升序或降序排序。该功能仅在前端进行列表变换，不影响后端接口返回结构；当清空筛选或重置排序时，列表恢复默认（按修改时间倒序）。
+- 实时校验：对 Python 路径、聊天区域、滚动参数与输出目录进行输入时/失焦时校验，高亮错误并提示；
+- 复制命令：提供“一键复制”示例运行命令、预览命令、打开输出目录命令与配置模板。
+
+安全约束（/api/open-path）：
+- 仅在 macOS 上启用；
+- 只允许项目根目录下的 `output/` 或 `outputs/` 内的路径；
+- 自动拒绝任何符号链接跳转、相对路径越界与非文件/目录路径。
+
+### 运行桌面 UI（Tkinter）
+
+在项目根目录运行桌面 UI：
+
+```
+/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12 ui/simple_gui.py
+```
+
+桌面 UI 功能要点：
+- 从配置服务加载：点击“从配置服务加载”即可调用 `GET /api/load-config` 并回填界面；
+- 查看最新导出：点击“查看最新导出”将调用 `scripts/list_latest_exports.py` 把结果追加到日志区；
+- 预览聊天区域：内置截屏（Pillow ImageGrab），生成 `outputs/debug_chat_area_preview.png` 并在左侧预览；
+- 启动/停止扫描：组合参数执行 `cli/auto_wechat_scan.py`，在日志区实时显示输出；
+- 自动检测 Python：点击“自动检测”可回填当前进程使用的解释器路径；
+- 输出目录校验：在任务启动前自动创建目录并进行可写性测试，失败时弹窗提示。
+
+建议的工作流：
+1) 网页端填写/保存配置到项目（实时校验便于发现问题）；
+2) 桌面 UI 点击“加载配置”或“从配置服务加载”完成回填；
+3) 通过“预览聊天区域”校准坐标；
+4) 启动扫描并在日志区观察过程；
+5) 扫描完成后，网页端“最新导出”卡片可快速打开/显示文件。
+
+### 快速验证
+
+1) 在本地启动配置服务（端口 8003），打开 `http://localhost:8003/ui_preview.html`；
+2) 点击“加载配置”确保 API 正常返回；
+3) 填写必要参数（Python 路径、输出目录等），保存到项目；
+4) 点击“查看最新导出（10条/20条）”，确认列表渲染并尝试“访达中显示/打开文件”；
+   同时体验筛选与排序：在筛选框中输入文件名关键字进行过滤，或点击“按修改时间/按名称”的升序/降序按钮改变列表顺序。
+5) 运行桌面 UI，点击“从配置服务加载”，确认表单回填正常。
+
+注意：网页端与桌面端均默认使用绝对路径示例；你也可以在桌面 UI 中通过“自动检测”获取当前解释器路径。本文档中的命令示例统一使用：
+
+```
+/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12
+```
+
+确保你的本机存在该解释器路径，否则请替换为实际路径。
