@@ -18,6 +18,8 @@ import sys
 import time
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+import socket
+import threading
 from urllib.parse import urlparse
 import subprocess
 
@@ -308,24 +310,65 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_error(404, "Not Found")
 
 
+class _ThreadingHTTPServerV6(ThreadingHTTPServer):
+    """
+    函数级注释：
+    - IPv6 版本的线程化 HTTP 服务器，将 address_family 设置为 AF_INET6；
+    - 便于同时在 ::1（IPv6 回环）与 127.0.0.1（IPv4 回环）上监听，兼容 CI/浏览器对 localhost 的解析偏好。
+    """
+    address_family = socket.AF_INET6
+
+
 def run_server(port: int) -> None:
     """
     函数级注释：
-    - 启动线程化 HTTP 服务器并在指定端口监听；
-    - 支持 Ctrl+C（SIGINT）优雅退出；
-    - 在 stdout 打印启动提示，便于调试与 CI 日志查看。
+    - 同时尝试在 IPv4(127.0.0.1) 与 IPv6(::1) 上监听端口，提升“localhost”访问的兼容性；
+    - 若某一协议簇绑定失败（例如环境未开启 IPv6），则忽略该错误，仅使用可用的监听；
+    - 使用后台线程分别运行两个监听实例，并在主线程阻塞等待以支持 Ctrl+C 优雅退出。
     """
-    server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-    print(f"配置服务已启动：http://localhost:{port}/ui_preview.html")
+    servers: list[ThreadingHTTPServer] = []
+    threads: list[threading.Thread] = []
+
+    # IPv4 监听
     try:
-        server.serve_forever(poll_interval=0.5)
+        srv4 = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+        servers.append(srv4)
+    except Exception as e:
+        print(f"[WARN] IPv4 绑定失败: {e}")
+
+    # IPv6 监听（使用 AF_INET6 家族）
+    try:
+        srv6 = _ThreadingHTTPServerV6(("::1", port), _Handler)
+        servers.append(srv6)
+    except Exception as e:
+        print(f"[WARN] IPv6 绑定失败: {e}")
+
+    if not servers:
+        raise RuntimeError(f"无法在端口 {port} 上绑定 IPv4/IPv6 监听")
+
+    print(f"配置服务已启动（IPv4/IPv6）：http://localhost:{port}/ui_preview.html")
+    try:
+        # 分别在后台线程运行各自的 serve_forever 循环
+        for s in servers:
+            t = threading.Thread(target=s.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True)
+            t.start()
+            threads.append(t)
+        # 主线程阻塞等待，支持 Ctrl+C 触发 KeyboardInterrupt
+        while True:
+            time.sleep(1.0)
     except KeyboardInterrupt:
         pass
     finally:
-        try:
-            server.server_close()
-        except Exception:
-            pass
+        # 优雅停止各服务器
+        for s in servers:
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            try:
+                s.server_close()
+            except Exception:
+                pass
 
 
 def main(argv: list[str] | None = None) -> int:
