@@ -89,7 +89,8 @@ def wait_for_server_ready(port: int, timeout: float = 10.0, interval: float = 0.
     - interval: 轮询间隔秒数。
     """
     deadline = time.monotonic() + timeout
-    url = f"http://localhost:{port}/api/metrics"
+    # 为避免 CI 环境中 localhost 解析为 IPv6(::1) 而服务仅在 IPv4 监听导致连接失败，统一使用 127.0.0.1
+    url = f"http://127.0.0.1:{port}/api/metrics"
     last_err = None
     while time.monotonic() < deadline:
         try:

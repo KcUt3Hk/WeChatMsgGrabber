@@ -310,13 +310,25 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_error(404, "Not Found")
 
 
+class _ThreadingHTTPServerV4(ThreadingHTTPServer):
+    """
+    函数级注释：
+    - IPv4 版本的线程化 HTTP 服务器；
+    - 显式开启 allow_reuse_address，减少短时间内重复启动/停止造成的端口占用（TIME_WAIT）影响；
+    - 优先保证 IPv4 监听成功，以适配测试中对 127.0.0.1 的连接校验。
+    """
+    address_family = socket.AF_INET
+    allow_reuse_address = True
+
+
 class _ThreadingHTTPServerV6(ThreadingHTTPServer):
     """
     函数级注释：
     - IPv6 版本的线程化 HTTP 服务器，将 address_family 设置为 AF_INET6；
-    - 便于同时在 ::1（IPv6 回环）与 127.0.0.1（IPv4 回环）上监听，兼容 CI/浏览器对 localhost 的解析偏好。
+    - 开启 allow_reuse_address，避免端口在快速重启时处于不可用状态；
     """
     address_family = socket.AF_INET6
+    allow_reuse_address = True
 
 
 def run_server(port: int) -> None:
@@ -329,24 +341,32 @@ def run_server(port: int) -> None:
     servers: list[ThreadingHTTPServer] = []
     threads: list[threading.Thread] = []
 
-    # IPv4 监听
-    try:
-        srv4 = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-        servers.append(srv4)
-    except Exception as e:
-        print(f"[WARN] IPv4 绑定失败: {e}")
+    # IPv4 监听（优先保证），若 127.0.0.1 失败则回退 0.0.0.0
+    ipv4_bound = False
+    for host in ("127.0.0.1", "0.0.0.0"):
+        if ipv4_bound:
+            break
+        try:
+            srv4 = _ThreadingHTTPServerV4((host, port), _Handler)
+            servers.append(srv4)
+            ipv4_bound = True
+            print(f"[INFO] IPv4 监听成功: {host}:{port}")
+        except Exception as e:
+            print(f"[WARN] IPv4 绑定失败({host}): {e}")
 
-    # IPv6 监听（使用 AF_INET6 家族）
-    try:
-        srv6 = _ThreadingHTTPServerV6(("::1", port), _Handler)
-        servers.append(srv6)
-    except Exception as e:
-        print(f"[WARN] IPv6 绑定失败: {e}")
+    # IPv6 监听（仅在 IPv4 未成功时作为补充，避免双栈端口冲突）
+    if not ipv4_bound:
+        try:
+            srv6 = _ThreadingHTTPServerV6(("::1", port), _Handler)
+            servers.append(srv6)
+            print(f"[INFO] IPv6 监听成功: ::1:{port}")
+        except Exception as e:
+            print(f"[WARN] IPv6 绑定失败(::1): {e}")
 
     if not servers:
         raise RuntimeError(f"无法在端口 {port} 上绑定 IPv4/IPv6 监听")
 
-    print(f"配置服务已启动（IPv4/IPv6）：http://localhost:{port}/ui_preview.html")
+    print(f"配置服务已启动：端口 {port}，建议访问 http://127.0.0.1:{port}/ui_preview.html")
     try:
         # 分别在后台线程运行各自的 serve_forever 循环
         for s in servers:
@@ -367,6 +387,12 @@ def run_server(port: int) -> None:
                 pass
             try:
                 s.server_close()
+            except Exception:
+                pass
+        # 等待后台线程退出
+        for t in threads:
+            try:
+                t.join(timeout=1.0)
             except Exception:
                 pass
 

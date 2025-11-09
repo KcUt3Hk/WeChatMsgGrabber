@@ -148,7 +148,8 @@ def test_metrics_meta_display(tmp_path):
     try:
         pw, browser, context, page = _create_page(headless=True)
         try:
-            page.goto(f"http://localhost:{port}/ui_preview.html", timeout=15000, wait_until="domcontentloaded")
+            # 统一使用 127.0.0.1，避免 CI 环境 localhost 解析为 IPv6 导致连接失败
+            page.goto(f"http://127.0.0.1:{port}/ui_preview.html", timeout=15000, wait_until="domcontentloaded")
             # 确保抓取一次指标并等待渲染
             wait_for_metrics_fetch(page, timeout_ms=15000)
             meta_text = page.locator("#metrics_meta").inner_text()
@@ -184,7 +185,7 @@ def test_snapshot_save_and_download_filename(tmp_path):
     try:
         pw, browser, context, page = _create_page(headless=True)
         try:
-            page.goto(f"http://localhost:{port}/ui_preview.html", timeout=15000, wait_until="domcontentloaded")
+            page.goto(f"http://127.0.0.1:{port}/ui_preview.html", timeout=15000, wait_until="domcontentloaded")
             wait_for_metrics_fetch(page, timeout_ms=15000)
 
             # 先点击“保存当前快照（写入文件）”，并等待 API 完成
@@ -231,7 +232,7 @@ def test_threshold_highlight_effect(tmp_path):
     try:
         pw, browser, context, page = _create_page(headless=True)
         try:
-            page.goto(f"http://localhost:{port}/ui_preview.html", timeout=15000, wait_until="domcontentloaded")
+            page.goto(f"http://127.0.0.1:{port}/ui_preview.html", timeout=15000, wait_until="domcontentloaded")
             wait_for_metrics_fetch(page, timeout_ms=15000)
 
             # 场景一：全部 good
@@ -288,7 +289,7 @@ def test_auto_refresh_updates_last_fetch(tmp_path):
     try:
         pw, browser, context, page = _create_page(headless=True)
         try:
-            page.goto(f"http://localhost:{port}/ui_preview.html", timeout=15000, wait_until="domcontentloaded")
+            page.goto(f"http://127.0.0.1:{port}/ui_preview.html", timeout=15000, wait_until="domcontentloaded")
             # 选择 1 秒刷新间隔并启用自动刷新
             wait_for_selector_safe(page, "#metrics_refresh_interval", timeout_ms=15000)
             page.select_option("#metrics_refresh_interval", "1000")
@@ -331,7 +332,7 @@ def test_reset_metrics_sets_zero_and_bad_tags(tmp_path):
     try:
         pw, browser, context, page = _create_page(headless=True)
         try:
-            page.goto(f"http://localhost:{port}/ui_preview.html", timeout=15000, wait_until="domcontentloaded")
+            page.goto(f"http://127.0.0.1:{port}/ui_preview.html", timeout=15000, wait_until="domcontentloaded")
             wait_for_metrics_fetch(page, timeout_ms=15000)
 
             # 触发重置并等待 API 完成，然后刷新并等待指标返回
