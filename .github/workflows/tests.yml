@@ -1,0 +1,172 @@
+# GitHub Actions 工作流：在 macOS 上运行 Python 测试
+# 说明：本工作流示例与 docs/ci.md 保持一致，使用 Python 3.12、pip 缓存与可选的 PaddleOCR 模型缓存。
+
+name: Python Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: macos-latest
+    env:
+      WECHAT_TEST_MODE: auto
+      UI_HEADLESS: "1"
+      UI_CLEAN_REPORTS: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Upgrade pip
+        run: |
+          python -m pip install --upgrade pip
+
+      - name: Privacy scan (block sensitive data)
+        run: |
+          python scripts/privacy_scan.py --fail-on-warning
+
+      - name: Cache PaddleOCR models (optional)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/paddleocr
+            ~/.paddleocr
+          key: ${{ runner.os }}-paddleocr-models
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+
+      - name: Run unit tests (exclude UI)
+        run: |
+          # 使用 pytest.ini 中的 addopts（-v/--tb=short/--strict-markers 等）
+          pytest -m "not ui"
+
+  ui-tests:
+    runs-on: macos-latest
+    env:
+      WECHAT_TEST_MODE: auto
+      UI_HEADLESS: "1"
+      UI_CLEAN_REPORTS: "1"
+      WX_SAFE_MODE: "1" # UI 测试使用安全模式以提高稳定性（禁用用户 site、离线补丁、关闭 GPU）
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Upgrade pip
+        run: |
+          python -m pip install --upgrade pip
+
+      - name: Privacy scan (block sensitive data)
+        run: |
+          python scripts/privacy_scan.py --fail-on-warning
+
+      - name: Cache PaddleOCR models (optional)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/paddleocr
+            ~/.paddleocr
+          key: ${{ runner.os }}-paddleocr-models
+
+      - name: Cache Playwright browsers (optional)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/.playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: |
+          # 仅安装 Chromium 以减少时间与避免不必要的浏览器体积
+          python -m playwright install chromium
+
+      - name: Run UI tests and generate HTML report
+        run: |
+          mkdir -p reports
+          pytest -m "ui" --html=reports/pytest-ui.html --self-contained-html
+
+      - name: Upload UI test artifacts (HTML + screenshots)
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-ui-report
+          path: |
+            reports
+
+  slow-tests:
+    runs-on: macos-latest
+    env:
+      WECHAT_TEST_MODE: auto
+      UI_HEADLESS: "1"
+      UI_CLEAN_REPORTS: "1"
+      WX_SAFE_MODE: "1" # 慢测试默认启用安全模式，规避 paddlex 网络探测导致的异常退出
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Upgrade pip
+        run: |
+          python -m pip install --upgrade pip
+
+      - name: Privacy scan (block sensitive data)
+        run: |
+          python scripts/privacy_scan.py --fail-on-warning
+
+      - name: Cache PaddleOCR models (optional)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/paddleocr
+            ~/.paddleocr
+          key: ${{ runner.os }}-paddleocr-models
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+
+      - name: Run slow tests
+        run: |
+          mkdir -p reports
+          pytest -m "slow" -q || true
+
+      - name: Upload slow test artifacts (logs)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slow-test-logs
+          path: |
+            .pytest_cache
+            reports
+          retention-days: 7
