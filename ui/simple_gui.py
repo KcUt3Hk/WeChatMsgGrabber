@@ -23,7 +23,6 @@ import threading
 import subprocess
 import json
 import shlex
-import shutil
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import List
@@ -198,37 +197,6 @@ class SimpleWechatGUI:
             cmd += ["--scroll-delay", self.var_scroll_delay.get().strip()]
         return cmd
 
-    def _build_scan_command_safe(self) -> List[str]:
-        """构建安全模式命令（在 Python 启动阶段禁用站点与环境预加载）
-
-        函数级注释：
-        - 在 Python 命令后追加 -S 与 -E 标志：
-          * -S 禁用 site 模块加载（避免 .pth/sitecustomize 的隐式导入）；
-          * -E 忽略影响启动的环境变量（如 PYTHONPATH）以提高一致性；
-        - 其余 CLI 参数与正常模式一致。
-        """
-        python_bin = (self.var_python_bin.get().strip() or PYTHON_BIN)
-        base = [python_bin, "-S", "-E", os.path.join(PROJECT_ROOT, "cli", "auto_wechat_scan.py")]
-        # 复用正常构建逻辑的其余参数（除去首项 python_bin 与脚本路径）
-        normal = self._build_scan_command()
-        return base + normal[2:]
-
-    def _build_safe_env(self) -> dict:
-        """构建安全模式环境变量字典
-
-        函数级注释：
-        - 复制当前 os.environ 并添加：
-          * PYTHONNOUSERSITE=1 禁用用户 site 包；
-          * PYTHONDONTWRITEBYTECODE=1 避免 .pyc 写入（某些受限环境更稳妥）；
-          * WX_SAFE_MODE=1 供项目内逻辑识别当前为安全模式；
-        - 保留原有 PATH 与显示权限相关变量，确保截图与窗口控制不受影响。
-        """
-        env = os.environ.copy()
-        env["PYTHONNOUSERSITE"] = "1"
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-        env["WX_SAFE_MODE"] = "1"
-        return env
-
     def _append_log(self, text: str):
         """将文本追加到日志区域并滚动到底部（线程安全）
 
@@ -335,57 +303,16 @@ class SimpleWechatGUI:
 
         def worker():
             try:
-                # 正常模式运行
-                collected_lines: List[str] = []
                 self.scan_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                 for line in self.scan_proc.stdout:
-                    msg = line.rstrip()
-                    collected_lines.append(msg)
-                    self._append_log(msg)
+                    self._append_log(line.rstrip())
                 code = self.scan_proc.wait()
                 self._append_log(f"进程退出码: {code}")
-
-                # 检测是否需进入安全模式重试（典型 Desktop 预加载导致的 -9/崩溃）
-                needs_safe_retry = False
-                if code in (-9, 134, 139):
-                    needs_safe_retry = True
-                else:
-                    joined = "\n".join(collected_lines)
-                    if ("Killed" in joined) or ("Abort trap" in joined) or ("Segmentation fault" in joined):
-                        needs_safe_retry = True
-
-                if code == 0 and not needs_safe_retry:
+                if code == 0:
                     try:
                         messagebox.showinfo("完成", "扫描完成")
                     except Exception:
                         pass
-                elif needs_safe_retry:
-                    # 自动安全模式重试
-                    safe_cmd = self._build_scan_command_safe()
-                    safe_env = self._build_safe_env()
-                    self._append_log("检测到异常退出，正在以安全模式重试：" + self._quote_cmd(safe_cmd))
-                    try:
-                        self.scan_proc = subprocess.Popen(safe_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=safe_env)
-                        for line in self.scan_proc.stdout:
-                            self._append_log(line.rstrip())
-                        safe_code = self.scan_proc.wait()
-                        self._append_log(f"安全模式退出码: {safe_code}")
-                        if safe_code == 0:
-                            try:
-                                messagebox.showinfo("完成", "安全模式下扫描完成")
-                            except Exception:
-                                pass
-                        else:
-                            try:
-                                messagebox.showwarning("警告", f"安全模式扫描退出码: {safe_code}")
-                            except Exception:
-                                pass
-                    except Exception as se:
-                        self._append_log(f"安全模式重试失败: {se}")
-                        try:
-                            messagebox.showerror("错误", f"安全模式重试失败: {se}")
-                        except Exception:
-                            pass
                 else:
                     try:
                         messagebox.showwarning("警告", f"扫描退出码: {code}")
@@ -1061,23 +988,12 @@ class SimpleWechatGUI:
         """自动检测当前 GUI 所使用的 Python 解释器路径并回填到输入框
 
         函数级注释：
-        - 检测优先级：
-          1) 环境变量 WX_PYTHON_BIN（若设置则优先使用）；
-          2) 通过 shutil.which('python3.12') 检查系统是否安装了 3.12 版本；
-          3) 回退到 sys.executable；
+        - 使用 sys.executable 获取当前进程的解释器；
+        - 对 macOS 用户通常返回 /usr/bin/python3 或 Homebrew/虚拟环境路径；
         - 检测成功后更新 var_python_bin 并提示。
         """
         try:
-            # 1) 环境变量优先
-            detected = os.environ.get("WX_PYTHON_BIN")
-            # 2) 检查 python3.12
-            if not detected:
-                cand = shutil.which("python3.12")
-                if cand and os.path.exists(cand):
-                    detected = cand
-            # 3) 回退到当前进程解释器
-            if not detected:
-                detected = sys.executable
+            detected = sys.executable
             if detected:
                 self.var_python_bin.set(detected)
                 try:

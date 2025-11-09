@@ -1,0 +1,16 @@
+# Core dependencies for WeChatMsgGrabber
+paddlepaddle>=2.4.0
+paddleocr>=2.6.0
+opencv-python>=4.5.0
+Pillow>=8.0.0
+pyautogui>=0.9.53
+pygetwindow>=0.0.9
+pandas>=1.3.0
+PyYAML>=6.0
+
+# Testing dependencies
+pytest>=7.0.0
+pytest-cov>=4.0.0
+pytest-xdist
+pytest-html>=4.0.0
+playwright>=1.45.0

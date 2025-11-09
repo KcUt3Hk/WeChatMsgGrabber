@@ -158,26 +158,7 @@ class OCRProcessor:
         """
         if config:
             self.config = config
-        # 函数级注释：
-        # - 安全模式识别：若环境变量 WX_SAFE_MODE 被设置为 1/true/on/yes，则在初始化前启用更保守的运行参数；
-        # - 目标：避免在导入或初始化阶段发生 paddlex 官方模型网络探测与 HEAD 请求，从而规避某些环境下的异常退出（-9/134/139）；
-        # - 行为：强制开启 paddlex YAML 缓存与离线补丁，并关闭 GPU（Apple Silicon 默认无 CUDA），降低潜在不稳定因素。
-        try:
-            _safe_flag = str(os.environ.get("WX_SAFE_MODE", "")).strip().lower()
-            safe_mode = _safe_flag in ("1", "true", "on", "yes")
-        except Exception:
-            safe_mode = False
-        if safe_mode:
-            try:
-                setattr(self.config, "enable_paddlex_yaml_cache", True)
-                setattr(self.config, "enable_paddlex_offline", True)
-                # 运行时保守设置：在 Mac (Apple Silicon) 环境下始终关闭 GPU
-                if hasattr(self.config, "use_gpu"):
-                    setattr(self.config, "use_gpu", False)
-                self.logger.info("WX_SAFE_MODE is ON: enabled paddlex YAML cache & offline patch; forced use_gpu=False.")
-            except Exception as _sme:
-                self.logger.debug(f"Apply safe-mode defaults failed (optional): {_sme}")
-        
+            
         try:
             requested_lang = (self.config.language or "ch").strip()
             # Map legacy/tesseract-style codes to PaddleOCR codes

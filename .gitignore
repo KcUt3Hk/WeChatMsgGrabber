@@ -1,0 +1,38 @@
+# Python cache and coverage
+__pycache__/
+*.py[cod]
+.coverage
+.pytest_cache/
+
+# Logs
+*.log
+logs/
+reports/
+
+# Test and runtime outputs (do not publish personal artifacts)
+output/
+outputs/
+test_output/
+test_content_extraction.log
+
+# OS/Editor
+.DS_Store
+.idea/
+.vscode/
+
+# Local environment files
+.env
+.env.*
+
+# Project local configs and generated artifacts (do not commit)
+profiles/
+metrics.json
+ui_config.json
+config.json
+metrics_log.csv
+metrics_log_*.csv
+
+# Playwright test artifacts
+playwright-report/
+test-results/
+playwright/.cache/

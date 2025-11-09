@@ -1,0 +1,728 @@
+"""
+OCR processing module for WeChatMsgGrabber.
+Handles PaddleOCR integration and image text recognition.
+"""
+import time
+import logging
+from typing import List, Optional, Tuple
+from collections import OrderedDict
+import hashlib
+import cv2
+import numpy as np
+from PIL import Image
+from paddleocr import PaddleOCR
+import inspect
+import tempfile
+import os
+
+from models.data_models import OCRResult, TextRegion, Rectangle
+from models.config import OCRConfig
+from services.image_preprocessor import ImagePreprocessor
+
+
+class OCRProcessor:
+    """
+    OCR processor using PaddleOCR engine for text recognition.
+    """
+    
+    def __init__(self, config: Optional[OCRConfig] = None):
+        """
+        Initialize OCR processor.
+        
+        Args:
+            config: OCR configuration. If None, uses default settings.
+        """
+        self.config = config or OCRConfig()
+        self.ocr_engine: Optional[PaddleOCR] = None
+        self.preprocessor = ImagePreprocessor()
+        self.logger = logging.getLogger(__name__)
+        # Simple LRU cache for OCR results of cropped regions to avoid repeated OCR on identical images
+        self._ocr_cache: "OrderedDict[str, OCRResult]" = OrderedDict()
+        self._cache_max_items: int = 256
+
+    def _get_image_hash(self, image: Image.Image) -> str:
+        """Compute a stable hash for a PIL Image to use as cache key."""
+        try:
+            # Convert to raw bytes in a deterministic format (RGB)
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            arr = np.array(image)
+            # Hash the pixel data with shape to avoid collisions
+            h = hashlib.md5()
+            h.update(arr.tobytes())
+            h.update(str(arr.shape).encode("utf-8"))
+            return h.hexdigest()
+        except Exception:
+            # Fallback to object id if hashing fails (rare); reduces cache effectiveness
+            return str(id(image))
+        
+    def initialize_engine(self, config: Optional[OCRConfig] = None) -> bool:
+        """
+        Initialize PaddleOCR engine with configuration.
+        
+        Args:
+            config: OCR configuration to use. If None, uses instance config.
+            
+        Returns:
+            bool: True if initialization successful, False otherwise
+        """
+        if config:
+            self.config = config
+            
+        try:
+            requested_lang = (self.config.language or "ch").strip()
+            # Map legacy/tesseract-style codes to PaddleOCR codes
+            legacy_map = {
+                "chi_sim": "ch",
+                "chi_tra": "ch",  # PaddleOCR uses 'ch' and supports Chinese dataset; for traditional-specific models, users can customize
+            }
+            if requested_lang in legacy_map:
+                mapped = legacy_map[requested_lang]
+                self.logger.warning(
+                    f"Requested OCR language '{requested_lang}' is not a PaddleOCR code; using '{mapped}' instead."
+                )
+                requested_lang = mapped
+
+            # Prepare fallback chain
+            fallback_langs: List[str] = []
+            if requested_lang != "ch":
+                fallback_langs.append("ch")
+            if requested_lang != "en":
+                fallback_langs.append("en")
+
+            lang_attempts = [requested_lang] + fallback_langs
+            last_error: Optional[Exception] = None
+
+            for lang in lang_attempts:
+                try:
+                    self.logger.info(f"Initializing PaddleOCR with language: {lang}")
+                    # Prepare kwargs and adapt based on runtime errors for unsupported arguments
+                    kwargs = dict(use_angle_cls=True, lang=lang, use_gpu=self.config.use_gpu, show_log=False)
+
+                    def _try_init(current_kwargs):
+                        return PaddleOCR(**current_kwargs)
+
+                    # Generic loop to remove unsupported kwargs progressively
+                    for _ in range(5):
+                        try:
+                            self.ocr_engine = _try_init(kwargs)
+                            break
+                        except Exception as init_err:
+                            msg = str(init_err)
+                            removed = False
+                            # Common phrases indicating unsupported arguments
+                            tokens = ['show_log', 'use_gpu', 'use_angle_cls']
+                            for t in tokens:
+                                if t in msg and t in kwargs:
+                                    self.logger.warning(f"PaddleOCR does not support '{t}' on this version; retrying without it...")
+                                    kwargs.pop(t, None)
+                                    removed = True
+                            # Also handle messages like "Unknown argument: <name>"
+                            if 'Unknown argument:' in msg:
+                                try:
+                                    import re
+                                    m = re.search(r"Unknown argument:\s*([A-Za-z0-9_]+)", msg)
+                                    if m:
+                                        unk = m.group(1)
+                                        if unk in kwargs:
+                                            self.logger.warning(f"PaddleOCR reported unknown argument '{unk}'; retrying without it...")
+                                            kwargs.pop(unk, None)
+                                            removed = True
+                                except Exception:
+                                    pass
+                            if not removed:
+                                # Could be a different error; propagate to outer handler to trigger language fallback
+                                raise
+                    else:
+                        # If loop didn't break, raise last error
+                        raise init_err
+
+                    # If we reach here, init succeeded
+                    if self.config.language != lang:
+                        self.logger.info(f"OCR language set to '{lang}' (was '{self.config.language}')")
+                        self.config.language = lang
+                    self.logger.info("PaddleOCR engine initialized successfully")
+                    return True
+                except Exception as init_err:
+                    last_error = init_err
+                    self.logger.warning(f"PaddleOCR init failed for lang='{lang}': {init_err}. Trying next fallback if available...")
+
+            # All attempts failed
+            if last_error:
+                self.logger.error(f"Failed to initialize OCR engine after {len(lang_attempts)} attempts: {last_error}")
+            else:
+                self.logger.error("Failed to initialize OCR engine: unknown error during initialization attempts")
+            return False
+        except Exception as e:
+            # Catch any unexpected error during language mapping or setup
+            self.logger.error(f"Failed to initialize OCR engine: {e}")
+            return False
+        
+    def process_image(self, image: Image.Image, preprocess: bool = True) -> OCRResult:
+        """
+        Process image and extract text using OCR.
+        
+        Args:
+            image: PIL Image to process
+            preprocess: Whether to apply image preprocessing
+            
+        Returns:
+            OCRResult: OCR processing result
+            
+        Raises:
+            RuntimeError: If OCR engine is not initialized
+        """
+        if self.ocr_engine is None:
+            raise RuntimeError("OCR engine not initialized. Call initialize_engine() first.")
+        
+        start_time = time.time()
+        
+        try:
+            # Apply preprocessing if requested
+            processed_image = image
+            if preprocess:
+                processed_image = self.preprocessor.preprocess_for_ocr(image)
+
+            # Ensure image is 3-channel RGB for OCR compatibility
+            if processed_image.mode != "RGB":
+                try:
+                    processed_image = processed_image.convert("RGB")
+                except Exception:
+                    # As a last resort, wrap grayscale into 3 channels using OpenCV
+                    arr_tmp = np.array(processed_image)
+                    if arr_tmp.ndim == 2:
+                        arr_tmp = cv2.cvtColor(arr_tmp, cv2.COLOR_GRAY2RGB)
+                    processed_image = Image.fromarray(arr_tmp)
+
+            # Convert PIL Image to numpy array for PaddleOCR
+            image_array = np.array(processed_image)
+
+            # Perform OCR with compatibility handling and robust fallbacks
+            def _safe_ocr_call(img_input):
+                """
+                Safely invoke PaddleOCR across versions:
+                - Prefer predict() when available and its signature does not include 'cls'
+                  because some PaddleOCR versions raise: "predict() got an unexpected keyword argument 'cls'"
+                - Fall back to ocr(), and if it throws a TypeError mentioning 'cls', retry via predict().
+                """
+                engine = self.ocr_engine
+
+                # Prefer predict() if present and appears compatible (no 'cls' kw)
+                try:
+                    pred = getattr(engine, "predict", None)
+                    if pred is not None:
+                        try:
+                            sig = inspect.signature(pred)
+                            if "cls" not in sig.parameters:
+                                self.logger.debug("OCR: using engine.predict() (signature verified, no 'cls' in parameters)")
+                                return pred(img_input)
+                        except Exception:
+                            # If introspection fails, still attempt predict() first
+                            self.logger.debug("OCR: using engine.predict() (introspection failed, attempting predict anyway)")
+                            return pred(img_input)
+                except Exception:
+                    # Ignore and fall back to ocr()
+                    pass
+
+                # Fall back to ocr(); do NOT explicitly pass 'cls' to avoid incompatibilities
+                try:
+                    self.logger.debug("OCR: using engine.ocr() (safe fallback, no explicit 'cls')")
+                    return engine.ocr(img_input)
+                except TypeError as te:
+                    msg = str(te)
+                    # If underlying implementation complains about 'cls', reroute to predict()
+                    if "unexpected keyword argument 'cls'" in msg and hasattr(engine, "predict"):
+                        self.logger.warning("OCR: engine.ocr() raised TypeError about 'cls'; rerouting to engine.predict() without 'cls'.")
+                        return engine.predict(img_input)
+                    raise
+
+            try:
+                ocr_results = _safe_ocr_call(image_array)
+            except Exception as e:
+                # Some PaddleOCR versions expect a file path. Try temporary file fallback.
+                self.logger.warning("Direct array OCR call failed (%s). Falling back to temp file path...", str(e))
+                tmp_path = None
+                try:
+                    fd, tmp_path = tempfile.mkstemp(suffix=".png")
+                    os.close(fd)
+                    # Save RGB image to ensure 3-channel input for OCR
+                    processed_image.save(tmp_path)
+                    ocr_results = _safe_ocr_call(tmp_path)
+                finally:
+                    if tmp_path and os.path.exists(tmp_path):
+                        try:
+                            os.remove(tmp_path)
+                        except Exception:
+                            pass
+
+            # Normalize results across PaddleOCR versions to avoid index errors
+            lines = []
+            try:
+                if ocr_results:
+                    # 处理新版PaddleOCR的字典格式
+                    if isinstance(ocr_results, dict):
+                        if "rec_texts" in ocr_results and "rec_scores" in ocr_results:
+                            # 新版格式: 字典包含rec_texts和rec_scores
+                            texts = ocr_results.get("rec_texts", [])
+                            scores = ocr_results.get("rec_scores", [])
+                            # 创建标准格式的lines
+                            for i, (text, score) in enumerate(zip(texts, scores)):
+                                if text and score is not None:
+                                    lines.append([text, float(score)])
+                        else:
+                            # 其他字典格式，尝试提取文本和置信度
+                            lines = self._parse_dict_format(ocr_results)
+                    elif isinstance(ocr_results, list) and ocr_results and isinstance(ocr_results[0], list):
+                        candidate = ocr_results[0]
+                        if candidate and isinstance(candidate[0], (list, tuple, dict, str)):
+                            lines = candidate
+                        else:
+                            lines = ocr_results
+                    else:
+                        lines = ocr_results
+            except Exception:
+                lines = []
+
+            # Process results safely
+            text_regions: List[TextRegion] = []
+            all_text: List[str] = []
+            total_confidence: float = 0.0
+
+            if isinstance(ocr_results, list) and ocr_results and isinstance(ocr_results[0], list):
+                candidate = ocr_results[0]
+                if candidate and isinstance(candidate[0], (list, tuple, dict, str)):
+                    lines = candidate
+                else:
+                    lines = ocr_results
+            else:
+                lines = ocr_results
+        except Exception:
+            lines = []
+
+        # Process results safely
+        text_regions: List[TextRegion] = []
+        all_text: List[str] = []
+        total_confidence: float = 0.0
+
+        if lines:
+                for line in lines:
+                    if not line:
+                        continue
+                    text = None
+                    confidence = None
+                    bbox = None
+
+                    # Attempt to parse varying line formats
+                    if isinstance(line, (list, tuple)):
+                        # Common PaddleOCR format: [bbox, [text, score]]
+                        if len(line) >= 2 and isinstance(line[1], (list, tuple)) and len(line[1]) >= 2:
+                            bbox = line[0]
+                            text = line[1][0]
+                            confidence = float(line[1][1])
+                        # Alternative format: [bbox, text, score]
+                        elif len(line) >= 3 and isinstance(line[1], str) and isinstance(line[2], (float, int)):
+                            bbox = line[0]
+                            text = line[1]
+                            confidence = float(line[2])
+                        # Text-only format: [text, score]
+                        elif len(line) >= 2 and isinstance(line[0], str) and isinstance(line[1], (float, int)):
+                            text = line[0]
+                            confidence = float(line[1])
+                            bbox = None
+                    elif isinstance(line, dict):
+                        text = line.get('text')
+                        confidence = float(line.get('confidence') or line.get('score') or 0)
+                        bbox = line.get('bbox') or line.get('box') or line.get('points')
+
+                    if text is None:
+                        continue
+                    if confidence is None:
+                        confidence = 0.0
+
+                    # Skip low confidence results
+                    if confidence < self.config.confidence_threshold:
+                        continue
+
+                    # Build bounding box if available
+                    if bbox and isinstance(bbox, (list, tuple)):
+                        try:
+                            x_coords = [p[0] for p in bbox if isinstance(p, (list, tuple)) and len(p) >= 2]
+                            y_coords = [p[1] for p in bbox if isinstance(p, (list, tuple)) and len(p) >= 2]
+                            if x_coords and y_coords:
+                                bounding_box = Rectangle(
+                                    x=int(min(x_coords)),
+                                    y=int(min(y_coords)),
+                                    width=int(max(x_coords) - min(x_coords)),
+                                    height=int(max(y_coords) - min(y_coords))
+                                )
+                            else:
+                                bounding_box = Rectangle(x=0, y=0, width=0, height=0)
+                        except Exception:
+                            bounding_box = Rectangle(x=0, y=0, width=0, height=0)
+                    else:
+                        bounding_box = Rectangle(x=0, y=0, width=0, height=0)
+
+                    # Create text region
+                    text_region = TextRegion(
+                        text=text,
+                        bounding_box=bounding_box,
+                        confidence=confidence
+                    )
+
+                    text_regions.append(text_region)
+                    all_text.append(text)
+                    total_confidence += confidence
+            
+            # Calculate average confidence
+            avg_confidence = total_confidence / len(text_regions) if text_regions else 0.0
+            
+            # Combine all text
+            combined_text = '\n'.join(all_text)
+            
+            processing_time = time.time() - start_time
+            
+            # Create bounding boxes list for OCRResult
+            bounding_boxes = [region.bounding_box for region in text_regions]
+            
+            result = OCRResult(
+                text=combined_text,
+                confidence=avg_confidence,
+                bounding_boxes=bounding_boxes,
+                processing_time=processing_time
+            )
+            
+            self.logger.debug(f"OCR processed {len(text_regions)} text regions in {processing_time:.2f}s")
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"OCR processing failed: {e}")
+            # Return empty result on failure
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                bounding_boxes=[],
+                processing_time=time.time() - start_time
+            )
+    
+    def extract_text_regions(self, image: Image.Image, preprocess: bool = True) -> List[TextRegion]:
+        """
+        Extract individual text regions from image.
+        
+        Args:
+            image: PIL Image to process
+            preprocess: Whether to apply image preprocessing
+            
+        Returns:
+            List[TextRegion]: List of detected text regions
+        """
+        if self.ocr_engine is None:
+            raise RuntimeError("OCR engine not initialized. Call initialize_engine() first.")
+        
+        try:
+            # Apply preprocessing if requested
+            processed_image = image
+            if preprocess:
+                processed_image = self.preprocessor.preprocess_for_ocr(image)
+            
+            # Ensure image is 3-channel RGB for OCR compatibility
+            if processed_image.mode != "RGB":
+                try:
+                    processed_image = processed_image.convert("RGB")
+                except Exception:
+                    arr_tmp = np.array(processed_image)
+                    if arr_tmp.ndim == 2:
+                        arr_tmp = cv2.cvtColor(arr_tmp, cv2.COLOR_GRAY2RGB)
+                    processed_image = Image.fromarray(arr_tmp)
+
+            # Convert PIL Image to numpy array
+            image_array = np.array(processed_image)
+
+            # Perform OCR with compatibility handling and robust fallbacks
+            def _safe_ocr_call(img_input):
+                """
+                Safely invoke PaddleOCR across versions:
+                - Prefer predict() when available and its signature does not include 'cls'
+                  because some PaddleOCR versions raise: "predict() got an unexpected keyword argument 'cls'"
+                - Fall back to ocr(), and if it throws a TypeError mentioning 'cls', retry via predict().
+                """
+                engine = self.ocr_engine
+
+                # Prefer predict() if present and appears compatible (no 'cls' kw)
+                try:
+                    pred = getattr(engine, "predict", None)
+                    if pred is not None:
+                        try:
+                            sig = inspect.signature(pred)
+                            if "cls" not in sig.parameters:
+                                self.logger.debug("OCR(regions): using engine.predict() (signature verified, no 'cls' in parameters)")
+                                return pred(img_input)
+                        except Exception:
+                            # If introspection fails, still attempt predict() first
+                            self.logger.debug("OCR(regions): using engine.predict() (introspection failed, attempting predict anyway)")
+                            return pred(img_input)
+                except Exception:
+                    # Ignore and fall back to ocr()
+                    pass
+
+                # Fall back to ocr(); do NOT explicitly pass 'cls' to avoid incompatibilities
+                try:
+                    self.logger.debug("OCR(regions): using engine.ocr() (safe fallback, no explicit 'cls')")
+                    return engine.ocr(img_input)
+                except TypeError as te:
+                    msg = str(te)
+                    # If underlying implementation complains about 'cls', reroute to predict()
+                    if "unexpected keyword argument 'cls'" in msg and hasattr(engine, "predict"):
+                        self.logger.warning("OCR(regions): engine.ocr() raised TypeError about 'cls'; rerouting to engine.predict() without 'cls'.")
+                        return engine.predict(img_input)
+                    raise
+
+            try:
+                ocr_results = _safe_ocr_call(image_array)
+            except Exception as e:
+                # Fallback to using a temporary file path if array input is unsupported
+                self.logger.warning("Direct array OCR call failed (%s). Falling back to temp file path...", str(e))
+                tmp_path = None
+                try:
+                    fd, tmp_path = tempfile.mkstemp(suffix=".png")
+                    os.close(fd)
+                    # Save RGB image to ensure 3-channel input for OCR
+                    processed_image.save(tmp_path)
+                    ocr_results = _safe_ocr_call(tmp_path)
+                finally:
+                    if tmp_path and os.path.exists(tmp_path):
+                        try:
+                            os.remove(tmp_path)
+                        except Exception:
+                            pass
+            
+            text_regions = []
+
+            # Normalize OCR output across versions
+            lines = []
+            try:
+                if ocr_results:
+                    if isinstance(ocr_results, list) and ocr_results and isinstance(ocr_results[0], list):
+                        candidate = ocr_results[0]
+                        if candidate and isinstance(candidate[0], (list, tuple, dict, str)):
+                            lines = candidate
+                        else:
+                            lines = ocr_results
+                    else:
+                        lines = ocr_results
+            except Exception:
+                lines = []
+
+            if lines:
+                for line in lines:
+                    if not line:
+                        continue
+                    text = None
+                    confidence = None
+                    bbox = None
+
+                    if isinstance(line, (list, tuple)):
+                        if len(line) >= 2 and isinstance(line[1], (list, tuple)) and len(line[1]) >= 2:
+                            bbox = line[0]
+                            text = line[1][0]
+                            confidence = float(line[1][1])
+                        elif len(line) >= 3 and isinstance(line[1], str) and isinstance(line[2], (float, int)):
+                            bbox = line[0]
+                            text = line[1]
+                            confidence = float(line[2])
+                        elif len(line) >= 2 and isinstance(line[0], str) and isinstance(line[1], (float, int)):
+                            text = line[0]
+                            confidence = float(line[1])
+                            bbox = None
+                    elif isinstance(line, dict):
+                        text = line.get('text')
+                        confidence = float(line.get('confidence') or line.get('score') or 0)
+                        bbox = line.get('bbox') or line.get('box') or line.get('points')
+
+                    if text is None:
+                        continue
+                    if confidence is None:
+                        confidence = 0.0
+
+                    # Skip low confidence results
+                    if confidence < self.config.confidence_threshold:
+                        continue
+
+                    # Build bounding box
+                    if bbox and isinstance(bbox, (list, tuple)):
+                        try:
+                            x_coords = [p[0] for p in bbox if isinstance(p, (list, tuple)) and len(p) >= 2]
+                            y_coords = [p[1] for p in bbox if isinstance(p, (list, tuple)) and len(p) >= 2]
+                            if x_coords and y_coords:
+                                bounding_box = Rectangle(
+                                    x=int(min(x_coords)),
+                                    y=int(min(y_coords)),
+                                    width=int(max(x_coords) - min(x_coords)),
+                                    height=int(max(y_coords) - min(y_coords))
+                                )
+                            else:
+                                bounding_box = Rectangle(x=0, y=0, width=0, height=0)
+                        except Exception:
+                            bounding_box = Rectangle(x=0, y=0, width=0, height=0)
+                    else:
+                        bounding_box = Rectangle(x=0, y=0, width=0, height=0)
+
+                    text_region = TextRegion(
+                        text=text,
+                        bounding_box=bounding_box,
+                        confidence=confidence
+                    )
+                    text_regions.append(text_region)
+            
+            self.logger.debug(f"Extracted {len(text_regions)} text regions")
+            return text_regions
+            
+        except Exception as e:
+            self.logger.error(f"Text region extraction failed: {e}")
+            return []
+    
+    def get_confidence_score(self, result: OCRResult) -> float:
+        """
+        Get confidence score for OCR result.
+        
+        Args:
+            result: OCR result to evaluate
+            
+        Returns:
+            float: Confidence score between 0.0 and 1.0
+        """
+        return result.confidence
+    
+    def calculate_enhanced_confidence(self, image: Image.Image, result: OCRResult) -> float:
+        """
+        Calculate enhanced confidence score combining OCR confidence and image quality.
+        
+        Args:
+            image: Original image used for OCR
+            result: OCR result
+            
+        Returns:
+            float: Enhanced confidence score between 0.0 and 1.0
+        """
+        try:
+            # Get OCR confidence
+            ocr_confidence = result.confidence
+            
+            # Get image quality score
+            quality_score = self.preprocessor.calculate_image_quality_score(image)
+            
+            # Combine scores with weights
+            # OCR confidence is more important, but image quality provides additional context
+            enhanced_confidence = (0.7 * ocr_confidence) + (0.3 * quality_score)
+            
+            self.logger.debug(f"Enhanced confidence: OCR={ocr_confidence:.3f}, Quality={quality_score:.3f}, Combined={enhanced_confidence:.3f}")
+            
+            return min(enhanced_confidence, 1.0)
+            
+        except Exception as e:
+            self.logger.error(f"Enhanced confidence calculation failed: {e}")
+            return result.confidence
+    
+    def detect_and_process_regions(self, image: Image.Image, max_regions: int = 25) -> List[Tuple[TextRegion, OCRResult]]:
+        """
+        Detect text regions and process each region separately for better accuracy.
+        
+        Args:
+            image: PIL Image to process
+            
+        Returns:
+            List[Tuple[TextRegion, OCRResult]]: List of (detected_region, ocr_result) pairs
+        """
+        if self.ocr_engine is None:
+            raise RuntimeError("OCR engine not initialized. Call initialize_engine() first.")
+        
+        try:
+            # Detect potential text regions
+            detected_regions = self.preprocessor.detect_text_regions(image)
+            # Performance optimization: limit to top-N regions by area
+            if len(detected_regions) > max_regions:
+                detected_regions = sorted(
+                    detected_regions,
+                    key=lambda r: r.width * r.height,
+                    reverse=True
+                )[:max_regions]
+            
+            results = []
+            
+            for region_rect in detected_regions:
+                # Crop the region
+                cropped_image = self.preprocessor.crop_text_region(image, region_rect)
+                
+                # Try cache first to skip duplicated OCR
+                cache_key = self._get_image_hash(cropped_image)
+                ocr_result = self._ocr_cache.get(cache_key)
+                if ocr_result is None:
+                    # Process the cropped region
+                    ocr_result = self.process_image(cropped_image, preprocess=True)
+                    # Insert into LRU cache
+                    self._ocr_cache[cache_key] = ocr_result
+                    # Move to end to mark as recently used
+                    self._ocr_cache.move_to_end(cache_key)
+                    # Enforce max size
+                    if len(self._ocr_cache) > self._cache_max_items:
+                        # pop the oldest item
+                        self._ocr_cache.popitem(last=False)
+                else:
+                    # Touch the item in LRU order
+                    self._ocr_cache.move_to_end(cache_key)
+                
+                # Create TextRegion with the detected rectangle and OCR text
+                if ocr_result.text.strip():  # Only include regions with text
+                    text_region = TextRegion(
+                        text=ocr_result.text,
+                        bounding_box=region_rect,
+                        confidence=ocr_result.confidence
+                    )
+                    
+                    results.append((text_region, ocr_result))
+            
+            self.logger.debug(f"Processed {len(results)} text regions separately")
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Region-based processing failed: {e}")
+            return []
+    
+    def is_engine_ready(self) -> bool:
+        """
+        Check if OCR engine is initialized and ready.
+        
+        Returns:
+            bool: True if engine is ready, False otherwise
+        """
+        return self.ocr_engine is not None
+    
+    def get_supported_languages(self) -> List[str]:
+        """
+        Get list of supported languages.
+        
+        Returns:
+            List[str]: List of supported language codes
+        """
+        # Common PaddleOCR supported languages
+        return [
+            'ch',      # Chinese & English
+            'en',      # English
+            'chi_sim', # Simplified Chinese
+            'chi_tra', # Traditional Chinese
+            'japan',   # Japanese
+            'korean',  # Korean
+            'ta',      # Tamil
+            'te',      # Telugu
+            'ka',      # Kannada
+            'hi',      # Hindi
+            'ar',      # Arabic
+        ]
+    
+    def cleanup(self) -> None:
+        """
+        Clean up OCR engine resources.
+        """
+        if self.ocr_engine is not None:
+            self.ocr_engine = None
+            self.logger.info("OCR engine cleaned up")

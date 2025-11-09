@@ -143,7 +143,7 @@ pytest -k locate_wechat_window_not_found -q
 
 ## 并行运行（pytest-xdist）
 
-在配备多核 CPU 的设备上，建议对“单元与常规测试”启用并行运行以显著加速：
+在配备多核 CPU 的设备（如 MacBook Pro M2 Max）上，建议对“单元与常规测试”启用并行运行以显著加速：
 
 ```bash
 # 使用 run_tests.py 快速并行运行（排除 integration/slow）
