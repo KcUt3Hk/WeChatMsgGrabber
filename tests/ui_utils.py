@@ -204,25 +204,28 @@ def pick_free_port(preferred: int | None = None, min_port: int = 8000, max_port:
     """
     函数级注释：
     - 寻找一个当前未被占用的本地 TCP 端口用于启动测试服务；
-    - 若提供 preferred，则优先尝试该端口；若不可用则自动回退到系统分配的临时端口；
-    - 通过临时绑定并释放的方式检测端口可用性，尽量降低端口冲突概率。
+    - 若提供 preferred，则优先使用该端口，但不再采用“预绑定释放”的方式，避免在部分系统上造成短暂的 TIME_WAIT/占用；
+    - 当 preferred 已被占用（能够成功连接）或不可用时，自动退回到系统分配的临时端口；
+    - 通过 connect_ex 进行“是否已被监听”的快速检测，降低端口冲突概率且不影响后续真实绑定。
 
     返回：
     - 可用端口号（int）。
     """
-    # 优先尝试用户偏好端口
+    # 优先尝试用户偏好端口：若当前无人监听，则直接返回该端口
     if preferred is not None:
         try:
             with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind(("127.0.0.1", preferred))
+                s.settimeout(0.2)
+                # 若能连接成功，说明端口已有服务在监听 → 不可用
+                in_use = (s.connect_ex(("127.0.0.1", preferred)) == 0)
+            if not in_use:
                 return preferred
-        except OSError:
+        except Exception:
+            # 检测过程中发生异常则视为不可用，继续回退逻辑
             pass
 
-    # 退回到系统分配的临时端口
+    # 退回到系统分配的临时端口（避免 listen 导致 TIME_WAIT，直接 bind 以获得端口号）
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", 0))
-        s.listen(1)
         return s.getsockname()[1]
