@@ -59,23 +59,30 @@ def _write_sample_metrics(snapshot_path: Path) -> None:
         json.dump(sample, f, ensure_ascii=False, indent=2)
 
 
-def _start_config_server(preferred_port: int = 8010) -> tuple[subprocess.Popen, int]:
+def _start_config_server(preferred_port: int | None = None) -> tuple[subprocess.Popen, int]:
     """
     函数级注释：
     - 在独立子进程中启动 web/config_server.py；
-    - 优先使用 preferred_port，若端口被占用则自动选择一个空闲端口；
+    - 优先尝试用户偏好端口，若启动失败则回退到系统临时端口以提升稳定性；
+    - 启动后轮询 /api/metrics 以确认服务就绪；
     - 返回 (Popen, 实际端口) 供后续页面访问与进程清理。
     """
-    port = pick_free_port(preferred=preferred_port)
-    cmd = [PYTHON_BIN, str(PROJECT_ROOT / "web" / "config_server.py"), "--port", str(port)]
-    proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    # 稳健等待服务就绪（轮询 /api/metrics）
-    try:
-        wait_for_server_ready(port=port, timeout=15.0, interval=0.2)
-    except Exception:
-        # 若就绪检查失败，仍返回进程句柄，后续测试会显式失败并保存诊断附件
-        pass
-    return proc, port
+    attempts = [pick_free_port(preferred=preferred_port), pick_free_port(preferred=None)]
+    last_exc: Exception | None = None
+    for port in attempts:
+        cmd = [PYTHON_BIN, str(PROJECT_ROOT / "web" / "config_server.py"), "--port", str(port)]
+        proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        try:
+            wait_for_server_ready(port=port, timeout=18.0, interval=0.25)
+            return proc, port
+        except Exception as e:
+            last_exc = e
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                pass
+    raise RuntimeError(f"配置服务启动失败：{last_exc}")
 
 
 def _create_page(headless: bool = None):
@@ -144,7 +151,7 @@ def test_metrics_meta_display(tmp_path):
     """
     snapshot_path = PROJECT_ROOT / "metrics.json"
     _write_sample_metrics(snapshot_path)
-    proc, port = _start_config_server(preferred_port=8010)
+    proc, port = _start_config_server(preferred_port=None)
     try:
         pw, browser, context, page = _create_page(headless=True)
         try:
@@ -181,7 +188,7 @@ def test_snapshot_save_and_download_filename(tmp_path):
     """
     snapshot_path = PROJECT_ROOT / "metrics.json"
     _write_sample_metrics(snapshot_path)
-    proc, port = _start_config_server(preferred_port=8010)
+    proc, port = _start_config_server(preferred_port=None)
     try:
         pw, browser, context, page = _create_page(headless=True)
         try:
@@ -228,7 +235,7 @@ def test_threshold_highlight_effect(tmp_path):
     """
     snapshot_path = PROJECT_ROOT / "metrics.json"
     _write_sample_metrics(snapshot_path)
-    proc, port = _start_config_server(preferred_port=8010)
+    proc, port = _start_config_server(preferred_port=None)
     try:
         pw, browser, context, page = _create_page(headless=True)
         try:
@@ -285,7 +292,7 @@ def test_auto_refresh_updates_last_fetch(tmp_path):
     """
     snapshot_path = PROJECT_ROOT / "metrics.json"
     _write_sample_metrics(snapshot_path)
-    proc, port = _start_config_server(preferred_port=8011)
+    proc, port = _start_config_server(preferred_port=None)
     try:
         pw, browser, context, page = _create_page(headless=True)
         try:
@@ -328,7 +335,7 @@ def test_reset_metrics_sets_zero_and_bad_tags(tmp_path):
     snapshot_path = PROJECT_ROOT / "metrics.json"
     _write_sample_metrics(snapshot_path)
     before_mtime = snapshot_path.stat().st_mtime
-    proc, port = _start_config_server(preferred_port=8012)
+    proc, port = _start_config_server(preferred_port=None)
     try:
         pw, browser, context, page = _create_page(headless=True)
         try:
