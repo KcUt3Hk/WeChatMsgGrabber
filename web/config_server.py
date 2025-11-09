@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
+import subprocess
 
 
 # 项目根目录：web/ 的上一级
@@ -134,6 +135,21 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _read_json_body(self) -> dict:
+        """
+        函数级注释：
+        - 读取并解析请求体为 JSON；当无内容或解析失败时返回空 dict；
+        - 仅支持 application/json，其他 Content-Type 也尝试解析，保持宽容。
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0:
+                return {}
+            raw = self.rfile.read(length)
+            return json.loads(raw.decode("utf-8"))
+        except Exception:
+            return {}
+
     def _write_html_file(self, path: str) -> None:
         """
         函数级注释：
@@ -156,7 +172,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (mixedCase)
         """
         函数级注释：
-        - 路由：/ui_preview.html 与 /api/metrics；
+        - 路由：/ui_preview.html、/api/metrics、/api/latest-exports、/api/load-config；
         - /api/metrics：优先读取 metrics.json；不存在则返回零值并标记来源为 generated。
         """
         parsed = urlparse(self.path)
@@ -177,13 +193,62 @@ class _Handler(BaseHTTPRequestHandler):
             }
             return self._write_json(resp)
 
+        if parsed.path == "/api/latest-exports":
+            """
+            函数级注释：
+            - 返回项目根目录下可能的导出文件列表（示例实现：扫描 exports/ 与 tmp/）；
+            - 结构：{ ok, files: [{path, mtime}] }，UI 可用于展示“最新导出”。
+            """
+            candidates = []
+            for d in (os.path.join(PROJECT_ROOT, "exports"), os.path.join(PROJECT_ROOT, "tmp")):
+                if not os.path.isdir(d):
+                    continue
+                try:
+                    for name in os.listdir(d):
+                        p = os.path.join(d, name)
+                        if os.path.isfile(p):
+                            try:
+                                stat = os.stat(p)
+                                candidates.append({"path": p, "mtime": int(stat.st_mtime)})
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            candidates.sort(key=lambda x: x["mtime"], reverse=True)
+            return self._write_json({"ok": True, "files": candidates})
+
+        if parsed.path == "/api/load-config":
+            """
+            函数级注释：
+            - 读取项目根目录 config.json（若不存在则返回默认配置）；
+            - 结构：{ ok, config }，其中 config 仅为示例字段，供 UI 表单回填使用。
+            """
+            cfg_path = os.path.join(PROJECT_ROOT, "config.json")
+            default_cfg = {
+                "python_path": "",
+                "auto_refresh": True,
+                "thresholds": {
+                    "latency.high_ms": 2000,
+                    "cache.hit_rate.bad": 0.5,
+                },
+            }
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        default_cfg.update(loaded)
+                except Exception:
+                    pass
+            return self._write_json({"ok": True, "config": default_cfg})
+
         # 其余路径：简单 404
         self.send_error(404, "Not Found")
 
     def do_POST(self) -> None:  # noqa: N802 (mixedCase)
         """
         函数级注释：
-        - 路由：/api/metrics/reset 与 /api/metrics/snapshot；
+        - 路由：/api/metrics/reset、/api/metrics/snapshot、/api/save-config、/api/open-path；
         - reset：写入零值指标并返回 ok/path；
         - snapshot：读取当前或默认指标，写入文件并返回 ok/path。
         """
@@ -197,6 +262,47 @@ class _Handler(BaseHTTPRequestHandler):
             data = cur if cur is not None else _default_metrics()
             path = _write_metrics_to_file(data)
             return self._write_json({"ok": True, "path": path})
+
+        if parsed.path == "/api/save-config":
+            """
+            函数级注释：
+            - 接收 JSON 配置并写入项目根目录 config.json；
+            - 返回 { ok, path } 以便页面提示保存位置。
+            """
+            cfg = self._read_json_body()
+            cfg_path = os.path.join(PROJECT_ROOT, "config.json")
+            try:
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+                return self._write_json({"ok": True, "path": cfg_path})
+            except Exception as e:
+                return self._write_json({"ok": False, "error": str(e)}, status=500)
+
+        if parsed.path == "/api/open-path":
+            """
+            函数级注释：
+            - 在 macOS 上尝试通过 `open` 命令打开指定路径；
+            - 为安全起见，仅允许打开位于项目根目录下的路径；
+            - 返回 { ok, opened }。
+            """
+            body = self._read_json_body()
+            p = body.get("path", "")
+            if not p:
+                return self._write_json({"ok": False, "error": "missing path"}, status=400)
+            # 归一化并限制到项目根目录
+            try:
+                ap = os.path.abspath(p)
+                if not ap.startswith(PROJECT_ROOT):
+                    return self._write_json({"ok": False, "error": "path not under project root"}, status=403)
+                # 在 CI/headless 环境下，忽略实际打开失败，不抛错
+                try:
+                    subprocess.run(["open", ap], check=False)
+                    opened = True
+                except Exception:
+                    opened = False
+                return self._write_json({"ok": True, "opened": opened, "path": ap})
+            except Exception as e:
+                return self._write_json({"ok": False, "error": str(e)}, status=500)
 
         # 其余未实现的接口返回 404（按需扩展）
         self.send_error(404, "Not Found")
