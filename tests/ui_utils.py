@@ -204,27 +204,41 @@ def pick_free_port(preferred: int | None = None, min_port: int = 8000, max_port:
     """
     函数级注释：
     - 寻找一个当前未被占用的本地 TCP 端口用于启动测试服务；
-    - 若提供 preferred，则优先使用该端口，但不再采用“预绑定释放”的方式，避免在部分系统上造成短暂的 TIME_WAIT/占用；
-    - 当 preferred 已被占用（能够成功连接）或不可用时，自动退回到系统分配的临时端口；
-    - 通过 connect_ex 进行“是否已被监听”的快速检测，降低端口冲突概率且不影响后续真实绑定。
+    - 若提供 preferred，则优先使用该端口（仅做“是否已有监听”的探测，不做预绑定，以避免占用冲突）；
+    - 当 preferred 不可用时，优先在 [min_port, max_port) 范围内顺序扫描并返回第一个未被监听的端口；
+    - 若范围内全部被占用，再回退到系统分配的临时端口（bind 到 0 获得端口号）。
 
     返回：
     - 可用端口号（int）。
+
+    设计动机：
+    - 在 macOS/GitHub Actions 上，直接使用系统临时端口可能与其他后台进程冲突，导致服务无法绑定；
+    - 通过优先选择 8000–9000 的常用开发端口区间，提升可绑定成功率与测试稳定性。
     """
     # 优先尝试用户偏好端口：若当前无人监听，则直接返回该端口
     if preferred is not None:
         try:
             with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-                s.settimeout(0.2)
-                # 若能连接成功，说明端口已有服务在监听 → 不可用
+                s.settimeout(0.25)
                 in_use = (s.connect_ex(("127.0.0.1", preferred)) == 0)
             if not in_use:
                 return preferred
         except Exception:
-            # 检测过程中发生异常则视为不可用，继续回退逻辑
+            # 检测异常则视为不可用，继续回退逻辑
             pass
 
-    # 退回到系统分配的临时端口（避免 listen 导致 TIME_WAIT，直接 bind 以获得端口号）
+    # 扫描固定端口区间，选择第一个未被监听的端口
+    for port in range(int(min_port), int(max_port)):
+        try:
+            with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+                s.settimeout(0.2)
+                if s.connect_ex(("127.0.0.1", port)) != 0:
+                    return port
+        except Exception:
+            # 个别端口检测异常，继续扫描下一个
+            continue
+
+    # 范围内全部不可用，回退到系统临时端口
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", 0))

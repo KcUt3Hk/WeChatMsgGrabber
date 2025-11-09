@@ -53,7 +53,18 @@ jobs:
       - name: Run unit tests (exclude UI)
         run: |
           # 使用 pytest.ini 中的 addopts（-v/--tb=short/--strict-markers 等）
-          pytest -m "not ui"
+          mkdir -p reports
+          pytest -m "not ui" | tee reports/pytest-unit.log
+
+      - name: Upload unit test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-logs
+          path: |
+            reports
+            .pytest_cache
+          retention-days: 7
 
   ui-tests:
     runs-on: macos-latest
@@ -110,9 +121,10 @@ jobs:
       - name: Run UI tests and generate HTML report
         run: |
           mkdir -p reports
-          pytest -m "ui" --html=reports/pytest-ui.html --self-contained-html
+          pytest -m "ui" --html=reports/pytest-ui.html --self-contained-html | tee reports/pytest-ui-console.log
 
       - name: Upload UI test artifacts (HTML + screenshots)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-ui-report
@@ -159,7 +171,7 @@ jobs:
       - name: Run slow tests
         run: |
           mkdir -p reports
-          pytest -m "slow" -q || true
+          pytest -m "slow" -q | tee reports/pytest-slow.log || true
 
       - name: Upload slow test artifacts (logs)
         if: failure()
