@@ -53,7 +53,7 @@ class TestOCRProcessor:
         # Draw Chinese and English text
         text_lines = [
             "微信聊天记录获取助手",
-            "WeChatMsgGrabber",
+            "WeChatMsgGraber",
             "测试文本 Test Text"
         ]
         

@@ -1,4 +1,4 @@
-# Core dependencies for WeChatMsgGrabber
+# Core dependencies for WeChatMsgGraber
 paddlepaddle>=2.4.0
 paddleocr>=2.6.0
 opencv-python>=4.5.0

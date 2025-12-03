@@ -1,5 +1,5 @@
 """
-Pytest configuration and shared fixtures for WeChatMsgGrabber tests.
+Pytest configuration and shared fixtures for WeChatMsgGraber tests.
 """
 import pytest
 import logging

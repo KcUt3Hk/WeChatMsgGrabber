@@ -81,13 +81,21 @@ def _start_server(preferred_port: int | None = None) -> tuple[subprocess.Popen, 
         # 等待端口就绪（同时兼容 IPv4/IPv6）
         if _wait_port_open(port, host="127.0.0.1", timeout_sec=20.0):
             return proc, port
-        # 若未就绪，先尝试终止进程再进行下一次尝试
+        # 若未就绪，先尝试终止进程再进行下一次尝试，并尽量抓取子进程输出用于诊断
         try:
             proc.terminate()
             proc.wait(timeout=3)
         except Exception:
             pass
-        last_err = AssertionError(f"server not responding on port {port}")
+        # 读取已退出子进程的输出（若有），仅保留尾部若干字符以避免日志过长
+        logs_tail = ""
+        try:
+            if proc.stdout:
+                out = proc.stdout.read()  # 进程已退出时不会阻塞
+                logs_tail = (out.decode("utf-8", "ignore")[-800:]).strip()
+        except Exception:
+            logs_tail = ""
+        last_err = AssertionError(f"server not responding on port {port}; logs_tail={logs_tail}")
     # 若所有尝试均失败，抛出更明确的错误以便 CI 诊断
     raise AssertionError(f"server failed to start on preferred/ephemeral ports: last_err={last_err}")
 

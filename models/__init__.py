@@ -1,1 +1,1 @@
-# Models package for WeChatMsgGrabber
+# Models package for WeChatMsgGraber

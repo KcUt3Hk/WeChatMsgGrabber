@@ -38,7 +38,7 @@ class TestOCRImageQuality:
         # Draw clear, high contrast text
         text_lines = [
             "微信聊天记录获取助手",
-            "WeChatMsgGrabber",
+            "WeChatMsgGraber",
             "高质量图像测试"
         ]
         
@@ -112,7 +112,7 @@ class TestOCRImageQuality:
             ],
             [
                 [[30, 80], [250, 80], [250, 110], [30, 110]],
-                ("WeChatMsgGrabber", 0.92)
+                ("WeChatMsgGraber", 0.92)
             ],
             [
                 [[30, 130], [180, 130], [180, 160], [30, 160]],
@@ -129,7 +129,7 @@ class TestOCRImageQuality:
         assert isinstance(result, OCRResult)
         assert result.confidence > 0.9  # High confidence expected
         assert "微信聊天记录获取助手" in result.text
-        assert "WeChatMsgGrabber" in result.text
+        assert "WeChatMsgGraber" in result.text
         assert "高质量图像测试" in result.text
         assert len(result.bounding_boxes) == 3
     

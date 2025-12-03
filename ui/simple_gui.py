@@ -50,6 +50,12 @@ class SimpleWechatGUI:
         self.root = root
         self.root.title("WeChat OCR 简易前端")
         self.preview_image = None
+        self.paused = False
+        self.log_file = None
+        self.current_log_path = ""
+        self.pause_timer_id = None
+        self.var_status = tk.StringVar(value="空闲")
+        self.var_current_log = tk.StringVar(value="")
 
         # 字段变量
         # Python 解释器路径（默认自动检测当前进程解释器，可在 UI 中修改或再次自动检测）
@@ -67,6 +73,7 @@ class SimpleWechatGUI:
         self.var_scroll_delay = tk.StringVar(value="")
         self.var_max_scrolls = tk.StringVar(value="60")
         self.var_max_spm = tk.StringVar(value="40")
+        self.var_spm_range = tk.StringVar(value="")
 
         self.format_vars = {
             "json": tk.BooleanVar(value=True),
@@ -76,84 +83,126 @@ class SimpleWechatGUI:
         }
 
         self._build_layout()
+        
+        # 绑定窗口尺寸变化事件以实现响应式调整
+        try:
+            self.root.bind("<Configure>", self._on_window_resize)
+            self._apply_responsive_layout()
+        except Exception:
+            pass
+        try:
+            self._apply_responsive_layout()
+        except Exception:
+            pass
 
     def _build_layout(self):
         """构建界面布局与控件"""
         frm = ttk.Frame(self.root, padding=10)
         frm.pack(fill=tk.BOTH, expand=True)
+        try:
+            for i in range(0, 10):
+                frm.columnconfigure(i, weight=1)
+        except Exception:
+            pass
+
+        # 顶部状态与当前日志文件名
+        row = 0
+        ttk.Label(frm, text="状态:").grid(row=row, column=0, sticky=tk.W)
+        ttk.Label(frm, textvariable=self.var_status).grid(row=row, column=1, sticky=tk.W)
+        ttk.Label(frm, text="当前扫描日志:").grid(row=row, column=2, sticky=tk.W)
+        ttk.Label(frm, textvariable=self.var_current_log).grid(row=row, column=3, columnspan=3, sticky=tk.W)
 
         # 第一行：Python 解释器路径
-        row = 0
+        row += 1
         ttk.Label(frm, text="Python 解释器路径:").grid(row=row, column=0, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_python_bin, width=40).grid(row=row, column=1, columnspan=3, sticky=tk.W)
-        ttk.Button(frm, text="自动检测", command=self.on_detect_python).grid(row=row, column=4, sticky=tk.W)
+        ttk.Entry(frm, textvariable=self.var_python_bin, width=34).grid(row=row, column=1, columnspan=3, sticky=tk.EW, padx=6, pady=3)
+        ttk.Button(frm, text="自动检测", command=self.on_detect_python, width=10).grid(row=row, column=4, sticky=tk.EW, padx=6, pady=3)
 
         # 第二行：窗口标题、聊天区域
         row += 1
         ttk.Label(frm, text="窗口标题（可选）:").grid(row=row, column=0, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_window_title, width=32).grid(row=row, column=1, sticky=tk.W)
+        ttk.Entry(frm, textvariable=self.var_window_title, width=24).grid(row=row, column=1, sticky=tk.EW, padx=6, pady=3)
         ttk.Label(frm, text="聊天区域坐标 x,y,w,h（可选）:").grid(row=row, column=2, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_chat_area, width=24).grid(row=row, column=3, sticky=tk.W)
-        ttk.Button(frm, text="预览聊天区域", command=self.on_preview_chat_area).grid(row=row, column=4, sticky=tk.W)
-        ttk.Button(frm, text="框选聊天区域", command=self.on_select_chat_area).grid(row=row, column=5, sticky=tk.W)
+        ttk.Entry(frm, textvariable=self.var_chat_area, width=16).grid(row=row, column=3, sticky=tk.EW, padx=6, pady=3)
+        ttk.Button(frm, text="预览聊天区域", command=self.on_preview_chat_area, width=12).grid(row=row, column=4, sticky=tk.EW, padx=6, pady=3)
+        ttk.Button(frm, text="框选聊天区域", command=self.on_select_chat_area, width=12).grid(row=row, column=5, sticky=tk.EW, padx=6, pady=3)
 
         # 第三行：滚动与 OCR
         row += 1
         ttk.Label(frm, text="方向:").grid(row=row, column=0, sticky=tk.W)
-        ttk.Combobox(frm, textvariable=self.var_direction, values=["up", "down"], width=6, state="readonly").grid(row=row, column=1, sticky=tk.W)
+        ttk.Combobox(frm, textvariable=self.var_direction, values=["up", "down"], width=6, state="readonly").grid(row=row, column=1, sticky=tk.EW)
         ttk.Label(frm, text="scroll-delay（秒，可空）:").grid(row=row, column=2, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_scroll_delay, width=8).grid(row=row, column=3, sticky=tk.W)
+        ttk.Entry(frm, textvariable=self.var_scroll_delay, width=6).grid(row=row, column=3, sticky=tk.EW, padx=6, pady=3)
         ttk.Label(frm, text="OCR 语言:").grid(row=row, column=4, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_ocr_lang, width=6).grid(row=row, column=5, sticky=tk.W)
+        ttk.Entry(frm, textvariable=self.var_ocr_lang, width=5).grid(row=row, column=5, sticky=tk.EW, padx=6, pady=3)
 
         # 第四行：阈值与开关
         row += 1
         ttk.Label(frm, text="max-scrolls:").grid(row=row, column=0, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_max_scrolls, width=6).grid(row=row, column=1, sticky=tk.W)
+        ttk.Entry(frm, textvariable=self.var_max_scrolls, width=6).grid(row=row, column=1, sticky=tk.EW)
         ttk.Label(frm, text="每分钟滚动 (spm):").grid(row=row, column=2, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_max_spm, width=6).grid(row=row, column=3, sticky=tk.W)
-        ttk.Checkbutton(frm, text="full-fetch", variable=self.var_full_fetch).grid(row=row, column=4, sticky=tk.W)
-        ttk.Checkbutton(frm, text="go-top-first", variable=self.var_go_top_first).grid(row=row, column=5, sticky=tk.W)
+        ttk.Entry(frm, textvariable=self.var_max_spm, width=6).grid(row=row, column=3, sticky=tk.EW)
+        ttk.Label(frm, text="spm范围(min,max，可选):").grid(row=row, column=4, sticky=tk.W)
+        ttk.Entry(frm, textvariable=self.var_spm_range, width=12).grid(row=row, column=5, sticky=tk.EW)
+        ttk.Checkbutton(frm, text="full-fetch", variable=self.var_full_fetch).grid(row=row, column=6, sticky=tk.W)
+        ttk.Checkbutton(frm, text="go-top-first", variable=self.var_go_top_first).grid(row=row, column=7, sticky=tk.W)
 
         # 第五行：导出与目录
         row += 1
         ttk.Label(frm, text="导出格式:").grid(row=row, column=0, sticky=tk.W)
         col = 1
         for name in ["json", "csv", "md", "txt"]:
-            ttk.Checkbutton(frm, text=name, variable=self.format_vars[name]).grid(row=row, column=col, sticky=tk.W)
+            ttk.Checkbutton(frm, text=name, variable=self.format_vars[name]).grid(row=row, column=col, sticky=tk.EW)
             col += 1
         ttk.Label(frm, text="输出目录:").grid(row=row, column=4, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_output_dir, width=24).grid(row=row, column=5, sticky=tk.W)
-        ttk.Button(frm, text="选择…", command=self.on_choose_output).grid(row=row, column=6, sticky=tk.W)
+        ttk.Entry(frm, textvariable=self.var_output_dir, width=22).grid(row=row, column=5, sticky=tk.EW, padx=6, pady=3)
+        ttk.Button(frm, text="选择…", command=self.on_choose_output, width=8).grid(row=row, column=6, sticky=tk.EW, padx=6, pady=3)
 
         # 第六行：文件名前缀与开关
         row += 1
         ttk.Label(frm, text="文件前缀:").grid(row=row, column=0, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_filename_prefix, width=20).grid(row=row, column=1, sticky=tk.W)
-        ttk.Checkbutton(frm, text="skip-empty", variable=self.var_skip_empty).grid(row=row, column=2, sticky=tk.W)
-        ttk.Checkbutton(frm, text="verbose", variable=self.var_verbose).grid(row=row, column=3, sticky=tk.W)
-        ttk.Button(frm, text="打开输出目录", command=self.on_open_output).grid(row=row, column=4, sticky=tk.W)
+        ttk.Entry(frm, textvariable=self.var_filename_prefix, width=16).grid(row=row, column=1, sticky=tk.EW, padx=6, pady=3)
+        ttk.Checkbutton(frm, text="skip-empty", variable=self.var_skip_empty).grid(row=row, column=2, sticky=tk.EW)
+        ttk.Checkbutton(frm, text="verbose", variable=self.var_verbose).grid(row=row, column=3, sticky=tk.EW)
+        ttk.Button(frm, text="打开输出目录", command=self.on_open_output).grid(row=row, column=4, sticky=tk.EW)
 
         # 第七行：操作按钮
         row += 1
-        self.btn_start = ttk.Button(frm, text="开始扫描", command=self.on_start_scan)
-        self.btn_start.grid(row=row, column=0, sticky=tk.W)
-        self.btn_stop = ttk.Button(frm, text="停止扫描", command=self.on_stop_scan, state="disabled")
-        self.btn_stop.grid(row=row, column=1, sticky=tk.W)
-        ttk.Button(frm, text="复制命令", command=self.on_copy_command).grid(row=row, column=2, sticky=tk.W)
-        ttk.Button(frm, text="保存配置", command=self.on_save_config).grid(row=row, column=3, sticky=tk.W)
-        ttk.Button(frm, text="加载配置", command=self.on_load_config).grid(row=row, column=4, sticky=tk.W)
-        ttk.Button(frm, text="从配置服务加载", command=self.on_load_from_server).grid(row=row, column=5, sticky=tk.W)
-        ttk.Button(frm, text="退出", command=self.root.quit).grid(row=row, column=6, sticky=tk.W)
-        ttk.Button(frm, text="查看最新导出", command=self.on_show_latest_exports).grid(row=row, column=7, sticky=tk.W)
-        ttk.Button(frm, text="最新导出列表", command=self.on_open_latest_exports_window).grid(row=row, column=8, sticky=tk.W)
+        self.btn_start = ttk.Button(frm, text="开始扫描", command=self.on_start_scan, width=12)
+        self.btn_start.grid(row=row, column=0, sticky=tk.EW, padx=6, pady=4)
+        self.btn_stop = ttk.Button(frm, text="停止扫描", command=self.on_stop_scan, state="disabled", width=12)
+        self.btn_stop.grid(row=row, column=1, sticky=tk.EW, padx=6, pady=4)
+        self.btn_pause = ttk.Button(frm, text="暂停扫描", command=self.on_pause_resume, state="disabled", width=12)
+        self.btn_pause.grid(row=row, column=2, sticky=tk.EW, padx=6, pady=4)
+        ttk.Button(frm, text="复制命令", command=self.on_copy_command, width=12).grid(row=row, column=3, sticky=tk.EW, padx=6, pady=4)
+        ttk.Button(frm, text="保存配置", command=self.on_save_config, width=12).grid(row=row, column=4, sticky=tk.EW, padx=6, pady=4)
+        ttk.Button(frm, text="加载配置", command=self.on_load_config, width=12).grid(row=row, column=5, sticky=tk.EW, padx=6, pady=4)
+        ttk.Button(frm, text="从配置服务加载", command=self.on_load_from_server, width=14).grid(row=row, column=6, sticky=tk.EW, padx=6, pady=4)
+        ttk.Button(frm, text="退出", command=self.root.quit, width=8).grid(row=row, column=7, sticky=tk.EW, padx=6, pady=4)
+        ttk.Button(frm, text="查看最新导出", command=self.on_show_latest_exports, width=14).grid(row=row, column=8, sticky=tk.EW, padx=6, pady=4)
+        ttk.Button(frm, text="最新导出列表", command=self.on_open_latest_exports_window, width=14).grid(row=row, column=9, sticky=tk.EW, padx=6, pady=4)
 
         # 预览图与日志
         row += 1
         self.preview_label = ttk.Label(frm, text="预览图将在此显示")
-        self.preview_label.grid(row=row, column=0, columnspan=3, sticky=tk.W)
+        self.preview_label.grid(row=row, column=0, columnspan=3, sticky=tk.EW)
         self.log_text = tk.Text(frm, height=20, width=120)
-        self.log_text.grid(row=row, column=3, columnspan=4, sticky=tk.W)
+        self.log_text.grid(row=row, column=3, columnspan=7, sticky=tk.NSEW)
+        try:
+            frm.rowconfigure(row, weight=1)
+        except Exception:
+            pass
+
+        # 第八行：消息样式预览（引用气泡“我/对方”标签）
+        row += 1
+        ttk.Label(frm, text="消息样式预览（引用气泡标签）:").grid(row=row, column=0, sticky=tk.W)
+        self.style_canvas = tk.Canvas(frm, width=540, height=160, bg="#ffffff", highlightthickness=1, highlightbackground="#e5eaf0")
+        self.style_canvas.grid(row=row, column=1, columnspan=6, sticky=tk.W, padx=(6,0))
+        try:
+            self._render_message_style_preview()
+        except Exception:
+            # 容错：若渲染失败不影响主流程
+            pass
 
     def _get_formats(self) -> str:
         """收集导出格式复选框，拼接为逗号分隔字符串"""
@@ -195,6 +244,8 @@ class SimpleWechatGUI:
             cmd.append("--verbose")
         if self.var_scroll_delay.get().strip():
             cmd += ["--scroll-delay", self.var_scroll_delay.get().strip()]
+        if self.var_spm_range.get().strip():
+            cmd += ["--spm-range", self.var_spm_range.get().strip()]
         return cmd
 
     def _append_log(self, text: str):
@@ -284,8 +335,29 @@ class SimpleWechatGUI:
             raise
         return outdir
 
+    def _update_preview_from_chat_area(self):
+        """根据当前聊天区域坐标抓取一次预览图并显示在左侧预览区"""
+        rect = self.var_chat_area.get().strip()
+        if not rect:
+            return
+        try:
+            parts = [p.strip() for p in rect.split(",")]
+            if len(parts) != 4:
+                return
+            x, y, w, h = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+            if w <= 0 or h <= 0:
+                return
+            bbox = (x, y, x + w, y + h)
+            img = ImageGrab.grab(bbox=bbox)
+            img.thumbnail((400, 400))
+            self.preview_image = ImageTk.PhotoImage(img)
+            self.preview_label.configure(image=self.preview_image)
+            self.preview_label.image = self.preview_image
+        except Exception:
+            pass
+
     def on_start_scan(self):
-        """启动扫描：在后台线程中执行命令并实时输出日志"""
+        """启动扫描：在后台线程中执行命令并实时输出日志；每次开始创建新的扫描日志文件"""
         # 1) 预检查 Python 路径与输出目录
         if not self._validate_python_bin():
             return
@@ -294,18 +366,35 @@ class SimpleWechatGUI:
             self._append_log(f"输出目录: {outdir}")
         except Exception:
             return
+        # 创建新的扫描日志文件
+        try:
+            path = self._create_new_log_file()
+            if path:
+                self._append_log(f"当前扫描日志: {path}")
+        except Exception:
+            pass
         # 2) 构建命令
         cmd = self._build_scan_command()
         self._append_log("运行命令: " + " ".join(cmd))
+        self.last_cmd = cmd
+        # 在开始扫描前，若设置了聊天区域坐标，则抓取一次预览图显示
+        try:
+            self._update_preview_from_chat_area()
+        except Exception:
+            pass
         # 切换按钮状态：开始 -> 禁用，停止 -> 启用
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
+        self.btn_pause.configure(state="normal")
+        self.var_status.set("扫描中")
 
         def worker():
             try:
                 self.scan_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                 for line in self.scan_proc.stdout:
-                    self._append_log(line.rstrip())
+                    line = line.rstrip()
+                    self._append_log(line)
+                    self._write_log_line_to_file(line)
                 code = self.scan_proc.wait()
                 self._append_log(f"进程退出码: {code}")
                 if code == 0:
@@ -327,8 +416,21 @@ class SimpleWechatGUI:
             finally:
                 # 回到可点击状态
                 def restore_buttons():
-                    self.btn_start.configure(state="normal")
-                    self.btn_stop.configure(state="disabled")
+                    if not getattr(self, "paused", False):
+                        self.var_status.set("空闲")
+                        self.btn_start.configure(state="normal")
+                        self.btn_stop.configure(state="disabled")
+                        self.btn_pause.configure(state="disabled", text="暂停扫描")
+                        try:
+                            if self.log_file:
+                                self.log_file.close()
+                                self.log_file = None
+                                self.var_current_log.set("")
+                        except Exception:
+                            pass
+                    else:
+                        self.btn_stop.configure(state="normal")
+                        self.btn_pause.configure(state="normal", text="继续扫描")
                 try:
                     self.root.after(0, restore_buttons)
                 except Exception:
@@ -443,6 +545,187 @@ class SimpleWechatGUI:
         # 允许按 Esc 取消并关闭窗口
         top.bind("<Escape>", lambda _: top.destroy())
 
+    def _render_message_style_preview(self):
+        """在 Canvas 中绘制两条示例引用气泡，分别标注“对方”与“我”。
+
+        函数级注释：
+        - 使用 Tkinter Canvas 基本图形绘制简化的聊天气泡；
+        - 左侧灰色气泡表示“对方”，右侧蓝色气泡表示“我”；
+        - 左上角以灰色小字标注身份标签，正文仅展示纯文本内容（示例）。
+        """
+        c = getattr(self, "style_canvas", None)
+        if not c:
+            return
+        c.delete("all")
+        # 对方气泡
+        x, y, w, h = 10, 10, 240, 110
+        c.create_rectangle(x, y, x + w, y + h, fill="#f5f5f5", outline="#d9d9d9")
+        c.create_text(x + 10, y + 12, text="对方", anchor=tk.W, fill="#888888", font=("Arial", 10))
+        c.create_text(x + 12, y + 36, text="“明天见”", anchor=tk.W, fill="#1f2328", font=("Arial", 12))
+        # 我方气泡
+        x2, y2, w2, h2 = 280, 10, 240, 110
+        c.create_rectangle(x2, y2, x2 + w2, y2 + h2, fill="#e6f4ff", outline="#91caff")
+        c.create_text(x2 + 10, y2 + 12, text="我", anchor=tk.W, fill="#888888", font=("Arial", 10))
+        c.create_text(x2 + 12, y2 + 36, text="“请查看这段”", anchor=tk.W, fill="#1f2328", font=("Arial", 12))
+
+    def _apply_responsive_layout(self):
+        """根据屏幕尺寸应用响应式布局（窗口宽度不超过屏幕宽度的60%）"""
+        try:
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            w = int(sw * 0.6)
+            h = int(min(0.8 * sh, 820))
+            self.root.geometry(f"{w}x{h}")
+            base_font = 12 if sw >= 1800 else (11 if sw >= 1440 else 10)
+            self.root.option_add("*Font", ("Arial", base_font))
+        except Exception:
+            pass
+
+    def _on_window_resize(self, event):
+        """窗口尺寸变化事件：动态调整字体与日志区扩展以适配超宽屏"""
+        try:
+            sw = self.root.winfo_screenwidth()
+            w = max(400, int(event.width))
+            base_font = 12 if sw >= 1800 else (11 if sw >= 1440 else 10)
+            adj = base_font if w >= int(sw * 0.5) else (base_font - 1 if w >= int(sw * 0.4) else base_font - 2)
+            self.root.option_add("*Font", ("Arial", max(9, adj)))
+        except Exception:
+            pass
+
+    def _apply_responsive_layout(self):
+        """根据屏幕尺寸应用响应式布局（窗口宽度不超过屏幕宽度的60%）"""
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        w = int(sw * 0.6)
+        h = int(min(0.8 * sh, 820))
+        try:
+            self.root.geometry(f"{w}x{h}")
+        except Exception:
+            pass
+        base_font = 12 if sw >= 1440 else (11 if sw >= 1280 else 10)
+        try:
+            self.root.option_add("*Font", ("Arial", base_font))
+        except Exception:
+            pass
+
+    def _create_new_log_file(self) -> str:
+        """创建新的扫描日志文件（scan_YYYYMMDD_HHMMSS.log）"""
+        import datetime
+        outdir = self._ensure_output_dir()
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(outdir, f"scan_{ts}.log")
+        try:
+            if self.log_file:
+                try:
+                    self.log_file.close()
+                except Exception:
+                    pass
+            self.log_file = open(path, "a", encoding="utf-8")
+            self.current_log_path = path
+            self.var_current_log.set(path)
+            return path
+        except Exception:
+            self.current_log_path = ""
+            return ""
+
+    def _write_log_line_to_file(self, line: str):
+        """将子进程输出追加写入当前日志文件"""
+        try:
+            if self.log_file:
+                self.log_file.write(line + "\n")
+                self.log_file.flush()
+        except Exception:
+            pass
+
+    def on_pause_resume(self):
+        """暂停或继续扫描：终止子进程但保持日志文件；继续时复用日志文件"""
+        # 扫描中 -> 暂停
+        if hasattr(self, "scan_proc") and self.scan_proc and self.scan_proc.poll() is None:
+            try:
+                self.scan_proc.terminate()
+            except Exception:
+                pass
+            self.paused = True
+            self.var_status.set("已暂停")
+            self.btn_pause.configure(text="继续扫描")
+            self.btn_start.configure(state="disabled")
+            self.btn_stop.configure(state="normal")
+            try:
+                if self.pause_timer_id:
+                    self.root.after_cancel(self.pause_timer_id)
+                self.pause_timer_id = self.root.after(30*60*1000, self._auto_stop_from_pause)
+            except Exception:
+                pass
+            return
+        # 已暂停 -> 继续
+        if self.paused:
+            cmd = getattr(self, "last_cmd", None) or self._build_scan_command()
+            self.var_status.set("扫描中")
+            self.btn_pause.configure(text="暂停扫描")
+            self.btn_start.configure(state="disabled")
+            self.btn_stop.configure(state="normal")
+            def worker():
+                try:
+                    self.scan_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                    for line in self.scan_proc.stdout:
+                        line = line.rstrip()
+                        self._append_log(line)
+                        self._write_log_line_to_file(line)
+                    code = self.scan_proc.wait()
+                    self._append_log(f"进程退出码: {code}")
+                except Exception as e:
+                    self._append_log(f"执行失败: {e}")
+                finally:
+                    def restore():
+                        if not self.paused:
+                            self.btn_start.configure(state="normal")
+                            self.btn_stop.configure(state="disabled")
+                            self.btn_pause.configure(state="disabled", text="暂停扫描")
+                            self.var_status.set("空闲")
+                            try:
+                                if self.log_file:
+                                    self.log_file.close()
+                                    self.log_file = None
+                                    self.var_current_log.set("")
+                            except Exception:
+                                pass
+                        else:
+                            self.btn_stop.configure(state="normal")
+                            self.btn_pause.configure(state="normal")
+                    try:
+                        self.root.after(0, restore)
+                    except Exception:
+                        pass
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+            self.paused = False
+            try:
+                if self.pause_timer_id:
+                    self.root.after_cancel(self.pause_timer_id)
+                    self.pause_timer_id = None
+            except Exception:
+                pass
+
+    def _auto_stop_from_pause(self):
+        """暂停超过30分钟后自动停止并重置界面"""
+        self.paused = False
+        self.var_status.set("空闲")
+        try:
+            if hasattr(self, "scan_proc") and self.scan_proc and self.scan_proc.poll() is None:
+                self.scan_proc.terminate()
+        except Exception:
+            pass
+        try:
+            if self.log_file:
+                self.log_file.close()
+                self.log_file = None
+                self.var_current_log.set("")
+        except Exception:
+            pass
+        self.btn_start.configure(state="normal")
+        self.btn_stop.configure(state="disabled")
+        self.btn_pause.configure(state="disabled", text="暂停扫描")
+
     def on_choose_output(self):
         """选择输出目录（使用原生文件夹选择对话框）"""
         dirname = filedialog.askdirectory(initialdir=self.var_output_dir.get())
@@ -461,13 +744,7 @@ class SimpleWechatGUI:
             messagebox.showerror("错误", f"打开目录失败: {e}")
 
     def on_stop_scan(self):
-        """停止扫描子进程并恢复按钮状态
-
-        函数级注释：
-        - 如果有正在运行的 scan 子进程，调用 terminate() 终止；
-        - 追加日志提示，并在主线程恢复按钮状态；
-        - 容错：若进程已退出或为空，给出提示。
-        """
+        """停止扫描子进程并恢复按钮状态；关闭当前扫描日志文件"""
         if hasattr(self, "scan_proc") and self.scan_proc and self.scan_proc.poll() is None:
             try:
                 self.scan_proc.terminate()
@@ -490,6 +767,22 @@ class SimpleWechatGUI:
         # 恢复按钮状态
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
+        self.btn_pause.configure(state="disabled", text="暂停扫描")
+        self.var_status.set("空闲")
+        self.paused = False
+        try:
+            if self.log_file:
+                self.log_file.close()
+                self.log_file = None
+                self.var_current_log.set("")
+        except Exception:
+            pass
+        try:
+            if self.pause_timer_id:
+                self.root.after_cancel(self.pause_timer_id)
+                self.pause_timer_id = None
+        except Exception:
+            pass
 
     def on_copy_command(self):
         """构建命令并复制到剪贴板

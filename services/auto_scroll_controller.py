@@ -61,6 +61,16 @@ class AutoScrollController:
         self._rate_limit_max_spm: Optional[int] = None
         self._rate_window_start_ts: float = time.time()
         self._rate_count: int = 0
+        # 动态速率抖动：在每分钟窗口内为上限设置一个随机子上限，模拟人类行为
+        try:
+            jitter_env = os.environ.get("WECHATMSGG_SPM_JITTER", "0.3").strip()
+            self._rate_spm_jitter = max(0.0, min(0.9, float(jitter_env)))
+        except Exception:
+            self._rate_spm_jitter = 0.3
+        self._rate_current_limit: Optional[int] = None
+        # 可选的每分钟滚动区间（min,max），优先于单一上限
+        self._rate_range_min: Optional[int] = None
+        self._rate_range_max: Optional[int] = None
 
         # 看门狗相关
         # macOS AppleScript 回退：默认关闭，避免在测试/CI环境触发系统级调用造成不稳定。
@@ -637,6 +647,10 @@ class AutoScrollController:
             # 执行滑动操作前进行速率限制
             self.throttle_if_needed()
             # 执行滑动操作
+            try:
+                pyautogui.moveTo(scroll_x, scroll_y, duration=0.1)
+            except Exception:
+                pass
             if direction.lower() == "down":
                 pyautogui.scroll(-scroll_distance, x=scroll_x, y=scroll_y)
             elif direction.lower() == "up":
@@ -648,6 +662,14 @@ class AutoScrollController:
             # 增加滑动后的等待时间，确保内容加载完成
             time.sleep(max(1.0, self.scroll_delay * 2))
             self.logger.info(f"按窗口高度滑动 {direction}，距离: {scroll_distance}px")
+            # 键盘回退：部分环境滚轮事件不被接收时，使用 PageUp/PageDown 辅助
+            try:
+                if direction.lower() == "down":
+                    pyautogui.press('pagedown')
+                else:
+                    pyautogui.press('pageup')
+            except Exception:
+                pass
             return True
             
         except Exception as e:
@@ -705,6 +727,10 @@ class AutoScrollController:
             self.throttle_if_needed()
             # Perform scroll operation
             scroll_amount = self.scroll_speed * 3  # Adjust scroll distance
+            try:
+                pyautogui.moveTo(scroll_x, scroll_y, duration=0.1)
+            except Exception:
+                pass
             
             if direction.lower() == "up":
                 pyautogui.scroll(scroll_amount, x=scroll_x, y=scroll_y)
@@ -857,7 +883,7 @@ class AutoScrollController:
             self.logger.error(f"Error checking if at bottom: {e}")
             return False
     
-    def _compare_screenshots(self, img1: Image.Image, img2: Image.Image, threshold: float = 0.95) -> bool:
+    def _compare_screenshots(self, img1: Image.Image, img2: Image.Image, threshold: float = 0.92) -> bool:
         """
         Compare two screenshots to determine if they are similar.
         
@@ -870,21 +896,27 @@ class AutoScrollController:
             True if images are similar (indicating no scroll movement), False otherwise
         """
         try:
-            # Convert PIL images to numpy arrays
-            arr1 = np.array(img1.convert('RGB'))
-            arr2 = np.array(img2.convert('RGB'))
-            
-            # Ensure same dimensions
-            if arr1.shape != arr2.shape:
+            g1 = cv2.cvtColor(np.array(img1.convert('RGB')), cv2.COLOR_RGB2GRAY)
+            g2 = cv2.cvtColor(np.array(img2.convert('RGB')), cv2.COLOR_RGB2GRAY)
+            if g1.shape != g2.shape:
                 return False
-            
-            # Calculate structural similarity
-            # Simple pixel-wise comparison for now
-            diff = np.abs(arr1.astype(float) - arr2.astype(float))
-            similarity = 1.0 - (np.mean(diff) / 255.0)
-            
-            self.logger.debug(f"Screenshot similarity: {similarity:.3f}")
-            # Ensure the return type is a native Python bool for test compatibility
+            g1 = g1.astype(np.float64)
+            g2 = g2.astype(np.float64)
+            kernel = (7, 7)
+            mu1 = cv2.GaussianBlur(g1, kernel, 1.5)
+            mu2 = cv2.GaussianBlur(g2, kernel, 1.5)
+            mu1_sq = mu1 * mu1
+            mu2_sq = mu2 * mu2
+            mu1_mu2 = mu1 * mu2
+            sigma1_sq = cv2.GaussianBlur(g1 * g1, kernel, 1.5) - mu1_sq
+            sigma2_sq = cv2.GaussianBlur(g2 * g2, kernel, 1.5) - mu2_sq
+            sigma12 = cv2.GaussianBlur(g1 * g2, kernel, 1.5) - mu1_mu2
+            L = 255.0
+            C1 = (0.01 * L) ** 2
+            C2 = (0.03 * L) ** 2
+            ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+            similarity = float(ssim_map.mean())
+            self.logger.debug(f"Screenshot SSIM: {similarity:.3f}")
             return bool(similarity >= threshold)
             
         except Exception as e:
@@ -989,6 +1021,31 @@ class AutoScrollController:
         if scroll_speed is not None:
             self.scroll_speed = max(1, min(10, int(scroll_speed)))
         self._rate_limit_max_spm = max_scrolls_per_minute if (max_scrolls_per_minute is None or max_scrolls_per_minute > 0) else None
+        # 重置当前窗口的动态子上限，在下一次 throttle 计算时生效
+        self._rate_current_limit = None
+
+    def set_spm_range(self, spm_min: int, spm_max: int) -> None:
+        """设置每分钟滚动的动态区间（min,max），优先用于生成本分钟的目标上限。
+
+        函数级注释：
+        - 当设置了区间后，在每个60秒时间窗开始时会随机选择一个本分钟子上限；
+        - 若同时设置了单一上限与区间，以区间为准；
+        - 可与抖动系数配合使用，但区间更直接，抖动会作为保守下限补充。
+        """
+        try:
+            spm_min = int(spm_min)
+            spm_max = int(spm_max)
+            if spm_min <= 0 or spm_max <= 0 or spm_min > spm_max:
+                raise ValueError("invalid spm range")
+            self._rate_range_min = spm_min
+            self._rate_range_max = spm_max
+            # 切换区间后立即重置本分钟子上限，使其在下一次窗口刷新时重新生成
+            self._rate_current_limit = None
+        except Exception:
+            # 无效区间时清空
+            self._rate_range_min = None
+            self._rate_range_max = None
+            self._rate_current_limit = None
 
     def throttle_if_needed(self) -> None:
         """
@@ -1006,6 +1063,24 @@ class AutoScrollController:
         if now - self._rate_window_start_ts >= 60.0:
             self._rate_window_start_ts = now
             self._rate_count = 0
+            # 在新窗口开始时，计算本分钟的动态子上限（不超过配置上限）
+            try:
+                import random
+                # 优先使用设置的区间；否则依据单一上限与抖动系数生成
+                if self._rate_range_min and self._rate_range_max:
+                    low = int(self._rate_range_min)
+                    high = int(self._rate_range_max)
+                    self._rate_current_limit = random.randint(low, max(low, high))
+                else:
+                    base = int(self._rate_limit_max_spm or 0)
+                    if base > 0:
+                        low = max(1, int(round(base * max(0.1, 1.0 - self._rate_spm_jitter))))
+                        high = base
+                        self._rate_current_limit = random.randint(low, high)
+                    else:
+                        self._rate_current_limit = None
+            except Exception:
+                self._rate_current_limit = None
         if self._rate_count >= self._rate_limit_max_spm:
             # 休眠到时间窗结束
             sleep_for = max(0.0, 60.0 - (now - self._rate_window_start_ts))
@@ -1015,6 +1090,18 @@ class AutoScrollController:
             # 切换到新的时间窗
             self._rate_window_start_ts = time.time()
             self._rate_count = 0
+        # 若设置了动态子上限，按子上限进行软节流（比总上限更保守）
+        try:
+            if self._rate_current_limit and self._rate_count >= int(self._rate_current_limit):
+                # 进行一次短暂停顿，模拟人类不规律的停顿
+                import random
+                extra = random.uniform(0.8, 2.2)
+                self.logger.debug(f"动态子上限 {self._rate_current_limit} 触发：额外停顿 {extra:.2f}s")
+                time.sleep(extra)
+                # 重置子上限计数窗口但不重置分钟窗（保持柔性节流）
+                self._rate_count = max(0, self._rate_count - int(self._rate_current_limit // 2))
+        except Exception:
+            pass
         # 计数一次滚动尝试
         self._rate_count += 1
 

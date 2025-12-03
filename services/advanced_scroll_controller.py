@@ -129,6 +129,15 @@ class AdvancedScrollController(AutoScrollController):
             # 添加随机延迟
             delay = random.uniform(*self.scroll_interval_range)
             time.sleep(delay)
+
+            # 偶发微暂停：模拟人为停顿，降低固定节律风险
+            try:
+                if random.random() < 0.12:  # 约每8-9次触发一次
+                    extra_pause = random.uniform(1.2, 2.6)
+                    self.logger.debug(f"微暂停 {extra_pause:.2f}s 以降低节律")
+                    time.sleep(extra_pause)
+            except Exception:
+                pass
             
             # 更新状态
             results.append(current_state)
@@ -155,6 +164,13 @@ class AdvancedScrollController(AutoScrollController):
         # 停止看门狗
         self.stop_watchdog()
         return results
+
+    def set_spm_range(self, spm_min: int, spm_max: int) -> None:
+        """设置滚动速率的每分钟区间（min,max），委托给基础控制器。"""
+        try:
+            super().set_spm_range(spm_min, spm_max)
+        except Exception:
+            pass
 
     def _locate_initial_position(self) -> bool:
         """定位初始滚动位置"""

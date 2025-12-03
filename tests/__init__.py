@@ -1,3 +1,3 @@
 """
-Test package for WeChatMsgGrabber.
+Test package for WeChatMsgGraber.
 """

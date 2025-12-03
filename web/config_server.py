@@ -402,8 +402,8 @@ def main(argv: list[str] | None = None) -> int:
     函数级注释：
     - 解析命令行参数并启动服务器；
     - 支持 --port 设置监听端口（默认 8003）。
-    """
-    parser = argparse.ArgumentParser(description="WeChatMsgGrabber 本地配置服务")
+"""
+    parser = argparse.ArgumentParser(description="WeChatMsgGraber 本地配置服务")
     parser.add_argument("--port", type=int, default=8003, help="监听端口（默认 8003）")
     args = parser.parse_args(argv)
     run_server(args.port)

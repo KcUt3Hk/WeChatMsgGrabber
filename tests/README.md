@@ -1,6 +1,6 @@
 # OCR Module Unit Tests
 
-This directory contains unit tests for the WeChatMsgGrabber OCR module, specifically testing OCR recognition accuracy and different image quality processing scenarios.
+This directory contains unit tests for the WeChatMsgGraber OCR module, specifically testing OCR recognition accuracy and different image quality processing scenarios.
 
 ## Test Files
 

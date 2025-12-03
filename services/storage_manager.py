@@ -43,7 +43,13 @@ class StorageManager:
         return Path(self.config.directory) / filename
 
     def _message_to_dict(self, msg: Message) -> dict:
-        """Serialize Message to a JSON-friendly dict."""
+        """Serialize Message to a JSON-friendly dict.
+
+        函数级注释：
+        - 基础字段保持与现有测试兼容（id/sender/content/message_type/timestamp/confidence_score/raw_ocr_text）；
+        - 当存在结构化扩展（share_card/quote_meta）时，序列化为嵌套字典，便于下游消费；
+        - 支持通过 OutputConfig.exclude_fields 排除顶层字段（包含 share_card/quote_meta 顶层键）。
+        """
         base = {
             "id": msg.id,
             "sender": msg.sender,
@@ -53,6 +59,17 @@ class StorageManager:
             "confidence_score": float(msg.confidence_score),
             "raw_ocr_text": msg.raw_ocr_text,
         }
+        # 扩展结构：分享卡片与引用气泡元信息
+        try:
+            if getattr(msg, "share_card", None) is not None:
+                base["share_card"] = asdict(msg.share_card)
+        except Exception:
+            pass
+        try:
+            if getattr(msg, "quote_meta", None) is not None:
+                base["quote_meta"] = asdict(msg.quote_meta)
+        except Exception:
+            pass
         # 根据 OutputConfig.exclude_fields 进行字段排除（CSV/JSON 共用）
         try:
             exclude = set((self.config and getattr(self.config, 'exclude_fields', []) ) or [])
@@ -170,8 +187,7 @@ class StorageManager:
             path = self._generate_filename(filename_prefix, "txt")
             with path.open("w", encoding="utf-8") as f:
                 for m in messages:
-                    line = f"[{m.timestamp.isoformat()}] {m.sender} ({m.message_type.value}): {m.content}"
-                    f.write(line + "\n")
+                    f.write(self._format_txt_message(m) + "\n")
             self.logger.info(f"Saved {len(messages)} messages to {path}")
             return path
 
@@ -180,7 +196,7 @@ class StorageManager:
         with path.open("w", encoding="utf-8") as f:
             f.write(f"# WeChat Chat Export\n\n")
             for m in messages:
-                f.write(f"- [{m.timestamp.isoformat()}] **{m.sender}** ({m.message_type.value}): {m.content}\n")
+                f.write(self._format_markdown_message(m) + "\n")
         self.logger.info(f"Saved {len(messages)} messages to {path}")
         return path
 
@@ -314,3 +330,115 @@ class StorageManager:
             if any(ch in s for ch in ["年", "月", "日", ":"]):
                 return True
         return False
+
+    def _format_markdown_message(self, m: Message) -> str:
+        """Format a single message into Markdown.
+
+        函数级注释：
+        - 普通消息：以列表项形式展示 "- [timestamp] **sender** (type): content"；
+        - 分享消息（MessageType.SHARE）：在主行之后追加缩进的细节（平台/标题/正文/来源/UP主/播放量/链接）；
+        - 引用气泡：在主行之前以 Markdown 引用块（>）展示原始昵称与引用正文，保留“我/对方”标签。
+        """
+        # STICKER/IMAGE：当内容为空时，给出明确备注，避免被误认为丢失
+        if m.message_type == MessageType.STICKER and not (m.content and str(m.content).strip()):
+            display_content = "表情包未识别出文字"
+        elif m.message_type == MessageType.IMAGE and not (m.content and str(m.content).strip()):
+            display_content = "图片未识别出文字"
+        else:
+            display_content = m.content
+        header = f"- [{m.timestamp.isoformat()}] **{m.sender}** ({m.message_type.value}): {display_content}"
+        lines = [header]
+
+        # 引用气泡（优先在主行之前给出上下文）
+        try:
+            if getattr(m, "quote_meta", None):
+                qm = m.quote_meta
+                # 使用 Markdown 引用块
+                lines.insert(0, f"> 引用（{qm.original_sender_label}）：{qm.original_nickname}")
+                if qm.quoted_text:
+                    lines.insert(1, f"> {qm.quoted_text}")
+        except Exception:
+            pass
+
+        # 分享卡片详情（追加在主行之后）
+        try:
+            if m.message_type == MessageType.SHARE and getattr(m, "share_card", None):
+                sc = m.share_card
+                detail: list[str] = []
+                if sc.platform:
+                    detail.append(f"  - 平台：{sc.platform}")
+                if sc.title:
+                    detail.append(f"  - 标题：{sc.title}")
+                if sc.body:
+                    # 将正文每行以额外缩进呈现，避免过长换行
+                    for ln in str(sc.body).splitlines():
+                        if ln.strip():
+                            detail.append(f"  - 正文：{ln.strip()}")
+                if sc.source:
+                    detail.append(f"  - 来源：{sc.source}")
+                if sc.up_name:
+                    detail.append(f"  - UP主：{sc.up_name}")
+                if sc.play_count is not None:
+                    detail.append(f"  - 播放量：{sc.play_count}")
+                if sc.canonical_url:
+                    detail.append(f"  - 链接：{sc.canonical_url}")
+                lines.extend(detail)
+        except Exception:
+            pass
+
+        return "\n".join(lines)
+
+    def _format_txt_message(self, m: Message) -> str:
+        """Format a single message into human-readable TXT line(s).
+
+        函数级注释：
+        - 普通消息：单行输出 "[timestamp] sender (type): content"；
+        - 分享消息：追加若干行细节（平台/标题/正文/来源/UP主/播放量/链接）；
+        - 引用气泡：在主行之前追加前缀为 "引用> " 的上下文两行。
+        """
+        # STICKER/IMAGE：当内容为空时，给出明确备注，避免被误认为丢失
+        if m.message_type == MessageType.STICKER and not (m.content and str(m.content).strip()):
+            display_content = "表情包未识别出文字"
+        elif m.message_type == MessageType.IMAGE and not (m.content and str(m.content).strip()):
+            display_content = "图片未识别出文字"
+        else:
+            display_content = m.content
+        header = f"[{m.timestamp.isoformat()}] {m.sender} ({m.message_type.value}): {display_content}"
+        lines = [header]
+
+        # 引用气泡
+        try:
+            if getattr(m, "quote_meta", None):
+                qm = m.quote_meta
+                lines.insert(0, f"引用> {qm.original_sender_label}：{qm.original_nickname}")
+                if qm.quoted_text:
+                    lines.insert(1, f"引用> {qm.quoted_text}")
+        except Exception:
+            pass
+
+        # 分享卡片
+        try:
+            if m.message_type == MessageType.SHARE and getattr(m, "share_card", None):
+                sc = m.share_card
+                detail: list[str] = []
+                if sc.platform:
+                    detail.append(f"平台：{sc.platform}")
+                if sc.title:
+                    detail.append(f"标题：{sc.title}")
+                if sc.body:
+                    for ln in str(sc.body).splitlines():
+                        if ln.strip():
+                            detail.append(f"正文：{ln.strip()}")
+                if sc.source:
+                    detail.append(f"来源：{sc.source}")
+                if sc.up_name:
+                    detail.append(f"UP主：{sc.up_name}")
+                if sc.play_count is not None:
+                    detail.append(f"播放量：{sc.play_count}")
+                if sc.canonical_url:
+                    detail.append(f"链接：{sc.canonical_url}")
+                lines.extend(detail)
+        except Exception:
+            pass
+
+        return "\n".join(lines)

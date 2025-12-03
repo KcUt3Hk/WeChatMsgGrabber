@@ -1,5 +1,5 @@
 """
-OCR processing module for WeChatMsgGrabber.
+OCR processing module for WeChatMsgGraber.
 Handles PaddleOCR integration and image text recognition.
 """
 import time
