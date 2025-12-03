@@ -14,6 +14,7 @@ outputs/
 reports/
 profiles/
 *.log
+.trae/
 
 # Local configs (use *.example.json in repo)
 config.json
@@ -22,4 +23,3 @@ ui_config.json
 # Playwright/Browser caches
 playwright-report/
 playwright/.cache/
-
