@@ -52,6 +52,7 @@ def main():
     parser.add_argument('--scroll-distance-range', help="滚动距离范围(像素)，格式: min,max")
     parser.add_argument('--scroll-interval-range', help="滚动时间间隔范围(秒)，格式: min,max")
     parser.add_argument('--max-scrolls-per-minute', type=int, help='每分钟滚动上限（速率限制）')
+    parser.add_argument('--spm-range', help='每分钟滚动数量区间，格式: min,max（优先生效）')
     # 输出与去重控制（统一通过 OutputConfig）
     parser.add_argument('--format', choices=['json','csv','txt','md'], help='输出格式覆盖')
     parser.add_argument('--formats', help='同时导出多种格式（逗号分隔），例如: json,csv；提供时覆盖 --format')
@@ -162,6 +163,15 @@ def main():
         scroll_distance_range = _parse_range(args.scroll_distance_range, cast=int)
         scroll_interval_range = _parse_range(args.scroll_interval_range, cast=float)
 
+        # 解析 spm-range
+        spm_range = None
+        try:
+            if args.spm_range:
+                a, b = [int(v.strip()) for v in args.spm_range.split(',')]
+                spm_range = (a, b)
+        except Exception:
+            spm_range = None
+
         messages = controller.advanced_scan_chat_history(
             max_scrolls=args.max_scrolls,
             direction=args.direction,
@@ -173,6 +183,7 @@ def main():
             scroll_distance_range=scroll_distance_range,
             scroll_interval_range=scroll_interval_range,
             max_scrolls_per_minute=args.max_scrolls_per_minute,
+            spm_range=spm_range,
         )
 
         # 应用过滤器（若提供）

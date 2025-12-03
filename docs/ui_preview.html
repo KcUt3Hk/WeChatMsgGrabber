@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>微信聊天记录获取助手（WeChatMsgGrabber）</title>
+<title>微信聊天记录获取助手（WeChatMsgGraber）</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
     .header { margin-bottom: 12px; }
@@ -40,6 +40,17 @@
     .module-title { margin: 0 0 8px; font-size: 18px; color: #2b3a67; }
     .module-body { margin-top: 6px; }
     .module .card { background: #fff; border-color: #eef2f7; margin-bottom: 12px; }
+    /* ShareCard 统一样式（标题-正文≥8px、正文-来源≥6px） */
+    .share-card { border: 1px solid #e3e6eb; border-radius: 8px; padding: 10px 12px; background: #fff; max-width: 520px; margin: 10px 0; }
+    .share-card .share-title { font-size: 15px; font-weight: 600; color: #1f2328; margin-bottom: 8px; }
+    .share-card .share-body { font-size: 13px; color: #3b3b3b; margin-bottom: 6px; }
+    .share-card .share-source { font-size: 12px; color: #808080; }
+    /* 引用气泡统一样式与标签（左上角灰色小字标注“我/对方”） */
+    .bubble { position: relative; display: inline-block; border-radius: 8px; padding: 22px 14px 10px; max-width: 520px; margin: 10px; line-height: 1.5; }
+    .bubble.me { background: #e6f4ff; border: 1px solid #91caff; }
+    .bubble.other { background: #f5f5f5; border: 1px solid #d9d9d9; }
+    .bubble-label { position: absolute; top: 6px; left: 10px; font-size: 12px; color: #888; }
+    .bubble-content { font-size: 14px; color: #1f2328; }
   </style>
   <script>
     /**
@@ -257,7 +268,7 @@
 <body>
   <!-- 页眉（一般标题 + 一句话介绍），替代原“项目名称/项目介绍”两个大模块 -->
   <div class="header">
-    <h1>微信聊天记录获取助手（WeChatMsgGrabber）</h1>
+<h1>微信聊天记录获取助手（WeChatMsgGraber）</h1>
     <p>本页用于说明与预览，支持参数设置、性能指标与最新导出。</p>
   </div>
 
@@ -549,6 +560,33 @@
       <button class="btn" onclick="loadConfigFromServer()">加载配置</button>
       <button class="btn btn-primary" onclick="saveConfigToServer()">保存到项目</button>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>网页预览：消息样式示例（ShareCard 与引用气泡）</h2>
+    <div>
+      <div class="share-card">
+        <div class="share-title">秋日咖啡指南</div>
+        <div class="share-body">在微风里喝一杯热拿铁</div>
+        <div class="share-source">来源：小红书</div>
+      </div>
+      <div class="share-card">
+        <div class="share-title">视觉之旅：穿越光影</div>
+        <div class="share-body">UP主：阿B · 播放量：12.3万</div>
+        <div class="share-source">来源：哔哩哔哩</div>
+      </div>
+    </div>
+    <div style="margin-top:8px;">
+      <div class="bubble other">
+        <div class="bubble-label">对方</div>
+        <div class="bubble-content">“明天见”</div>
+      </div>
+      <div class="bubble me">
+        <div class="bubble-label">我</div>
+        <div class="bubble-content">“请查看这段”</div>
+      </div>
+    </div>
+    <div class="help">说明：上述样式类集中管理于 <code>.share-card</code> 与 <code>.bubble</code>，标题-正文间距≥8px，正文-来源间距≥6px；引用气泡左上角标注“我/对方”。</div>
   </div>
 
   <div class="card">

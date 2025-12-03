@@ -384,6 +384,7 @@ class MainController:
         scroll_distance_range: Optional[tuple] = None,
         scroll_interval_range: Optional[tuple] = None,
         max_scrolls_per_minute: Optional[int] = None,
+        spm_range: Optional[tuple] = None,
     ) -> List[Message]:
         """
         高级聊天历史扫描 - 使用渐进式滑动和智能终止检测
@@ -420,6 +421,10 @@ class MainController:
         try:
             if max_scrolls_per_minute is not None:
                 advanced_scroll.set_rate_limits(scroll_delay=scroll_delay, scroll_speed=scroll_speed, max_scrolls_per_minute=max_scrolls_per_minute)
+            # 若提供 spm 区间，优先生效
+            if spm_range is not None and len(spm_range) == 2:
+                mn, mx = spm_range
+                advanced_scroll.set_spm_range(int(mn), int(mx))
         except Exception:
             pass
 

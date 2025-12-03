@@ -232,10 +232,13 @@ class ImagePreprocessor:
             mask = binary if white_ratio < white_ratio_inv else binary_inv
 
             if use_morphology:
-                # 形态学开运算去噪，再轻度闭运算连通字符
-                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-                opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-                closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=1)
+                h_img, w_img = mask.shape[:2]
+                max_side_cur = max(h_img, w_img)
+                k = 3 if max_side_cur < 900 else 5
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+                its = 1 if k == 3 else 2
+                opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=its)
+                closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel, iterations=its)
                 mask = closed
 
             # 查找外部轮廓

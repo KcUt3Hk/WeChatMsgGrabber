@@ -1,1 +1,1 @@
-# Services package for WeChatMsgGrabber
+# Services package for WeChatMsgGraber

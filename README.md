@@ -1,3 +1,27 @@
+解决本地破解微信消息导致的合规问题，采用更笨的方法：模拟滑动聊天窗口查看消息，进行OCR识别，解析为结构化的消息。 
+
+v2.0版本主要优化
+- 提高稳定性，经测试，连续10小时滑动和识别，稳定无异常；
+- 优化对分享内容的识别，如：消息卡片、小程序等；
+- 优化了消息去重逻辑，避免重复导出相同的消息；
+- 优化桌面应用UI和交互，增加暂停/继续扫描功能；
+- 等。
+其他已知问题：仍有部分消息无法识别，如：图片中的文字等。  
+
+结构化的消息生成后，请自行借助第三方AI（如 ChatGPT、Claude 等）进行分析。
+（原本计划发布的消息分析工具，开发出了demo，但觉得满足不了需求，又因为要开发其他项目，遂弃）
+
+说明：
+- 该程序完全借助AI开发，没有一行代码是我写的
+- 本人代码水平仅限于 print hello world
+- 等有时间再继续更新
+- 在此及之前描述由我本人所写
+
+# 微信聊天记录获取助手（WeChatMsgGrabber）
+文档结构概览：
+1. 最近更新（重点）
+2. 项目介绍
+3. 使用指南（桌面应用为主）
 因为最近一段的经历，想导出微信聊天记录分析下内容，但是发现多个工具都因合规问题被迫删库了。
 在揣着小鱼干去喂小猫的路上，突然想到可以用最笨的方式去处理，定位聊天窗口 - 滑动窗口 - 截图 - ORC识别文字 - 导出文字。
 相比破解本地的微信备份记录，这种方案更安全，没有合规问题；缺点是处理速度慢，不能100%精准识别。
@@ -38,11 +62,6 @@
 - 支持自动滚动、渐进式滑动与智能终止检测，覆盖基础与高级两类扫描方式
 - 提供 CLI、简易桌面 UI（Tkinter）与网页预览/配置服务，满足不同使用场景
 - 多格式导出（JSON/CSV/TXT/Markdown）与持久化去重索引，便于批量处理与复用
-
-目标用户与应用场景：
-- 测试工程师：快速采集聊天记录用于测试数据或回归分析
-- 数据分析/研究人员：将聊天内容结构化导出，便于进一步统计或建模
-- 合规与存档：按需批量导出特定群/会话，作为归档或留痕材料
 
 主要技术栈与架构概述：
 - 语言与运行时：Python 3.12
@@ -283,44 +302,23 @@ GPU 加速（可选）：
 
 ## 3. 使用指南
 
+### 3.2 桌面应用（推荐）
+
+- 安装依赖：`python3 -m pip install -r requirements.txt`；如缺 Pillow：`python3 -m pip install Pillow`
+- 启动：`python3 ui/simple_gui.py`（遇到权限/窗口控制问题可用 `SAFE_MODE=1`）
+- 核心流程：设置 `窗口标题` 或 `聊天区域 x,y,w,h` → 选择 `OCR 语言` 与 `输出目录` → 点击 `开始扫描`
+- 日志管理：每次开始自动生成 `scan_YYYYMMDD_HHMMSS.log`，顶部显示当前日志路径
+- 暂停/继续：扫描中可随时暂停（终止子进程但保留日志）；继续后在原日志追加；暂停超过 30 分钟自动停止
+- 速率控制：填写 `每分钟滚动 (spm)`；可选 `spm范围(min,max)`（如 `30,60`）以动态化速率；默认滚动间隔随机化并偶发微暂停
+- 预览：填写 `x,y,w,h` 后，开始前自动截取一次聊天区域预览图用于校准；也可点击“预览聊天区域”
+- 权限：确保“屏幕录制/辅助功能”已授权当前终端或 Python 解释器
+
+发布到 GitHub 的隐私提示：
+- 本地 `config.json` 与 `ui_config.json` 含个人路径，已通过 `.gitignore` 排除；如需示例，请参考 `config.example.json` 与 `ui_config.example.json`
+- 发布前可运行 `python3 scripts/privacy_scan.py --fail-on-warning` 或使用自动准备脚本 `python3 scripts/prepare_release.py`，在 `dist/github-release` 生成已脱敏的副本供提交
 ### 3.2 桌面应用
 
-桌面 UI 提供参数设置、预览与一键扫描能力，适合非命令行用户或需要交互式调试的场景。
 
-安装与配置：
-1) 确认本机可用的 Python 解释器（例如命令 `python3`）
-2) 安装 Pillow（若尚未安装）：
-```bash
-python3 -m pip install --upgrade pip Pillow
-```
-
-启动应用：
-```bash
-# 正常模式
-python3 ui/simple_gui.py
-
-# 安全模式（若遇到窗口控制/权限问题）
-SAFE_MODE=1 python3 ui/simple_gui.py
-```
-
-基本操作指南：
-- 在 UI 中设置窗口标题（如“微信/WeChat”）、聊天区域坐标（x,y,w,h）、OCR 语言（ch/en/japan/korean）与输出目录。
-- 点击“开始扫描/开始采集”，观察进度条与日志提示，等待导出完成。
-- 打开输出目录，检查生成的 JSON/CSV/TXT/Markdown 文件与截图。
-
-常见功能说明：
-- 聊天区域覆盖：在受限环境下可直接提供区域坐标，跳过窗口定位与激活流程。
-- 进度显示：在界面或终端日志中显示解析条数与状态；异常时给出提示。
-- 安全模式：降低对窗口 API 的依赖，增强在受限或权限不足环境中的稳定性。
-
-截图参考：网页预览页面（docs/ui_preview.html）中提供 UI 布局示意与“复制启动命令”按钮，可用作视觉参考。
-
-子节：安全模式与解释器选择（桌面 UI）
-
-- 异常退出自动重试：当子进程出现异常（如退出码 -9/134/139 或输出包含 Killed/Abort trap/Segmentation fault），桌面 UI 将自动切换为“安全模式”并重试。
-- 安全模式行为：在 Python 启动命令中追加参数 -S -E，并设置环境变量以提升稳健性（例如 PYTHONNOUSERSITE=1、PYTHONDONTWRITEBYTECODE=1、WX_SAFE_MODE=1）。
-- 解释器选择优先级：WX_PYTHON_BIN > python3.12（若可用）> 当前进程解释器；如需固定使用本机虚拟环境解释器，可在终端导出 WX_PYTHON_BIN 后运行。
-- 常规建议：仅在检测到异常退出时自动启用安全模式；常规环境下保持正常模式以获得完整功能与最佳性能。
 
 ### 3.1 一键自动化脚本
 
@@ -360,6 +358,7 @@ python3 cli/run_advanced_scan.py \
   --max-scrolls 60 --direction up \
   --scroll-delay 0.8 --scroll-distance-range 150,300 \
   --scroll-interval-range 0.2,0.6 --max-scrolls-per-minute 40 \
+  --spm-range 30,60 \
   --chat-area 120,90,900,920 \
   --formats json,csv,md \
   --metrics-file ./output/metrics.csv --metrics-format csv
@@ -411,6 +410,7 @@ python3 cli/run_advanced_scan.py \
   - 资源心跳与指标：循环内输出滚动计数与可用的 CPU/MEM 统计，便于长时运行定位性能瓶颈。
   - 内存管理：历史截图按需裁剪与可选降采样（例如仅保留最近若干次截图、对大图进行比例缩放），适合千级滚动场景。
   - 终止条件：到达边缘、命中关键字、FAILSAFE（鼠标移至角落）等条件均可触发停止。
+  - 速率控制增强：支持 `--spm-range min,max` 与抖动（环境变量 `WECHATMSGG_SPM_JITTER`，默认 0.3），循环内加入偶发微暂停（约每 8–9 次触发 1.2–2.6s）。
 
 ### 3.3 网页预览
 
@@ -465,6 +465,8 @@ open http://localhost:8003/ui_preview.html
   - 在终端直接运行脚本，并为 Python 启动追加 -S -E（禁用 site 模块加载与环境变量影响）。
   - 使用调试脚本观察启动行为差异（解释器路径、sitecustomize/usercustomize 是否加载、是否触发重型库初始化）。
   - 如无需 PaddleX，可在当前虚拟环境卸载以避免干扰。
+- 如必须在桌面应用中运行，尽量添加 -S -E 或设置 PYTHONNOUSERSITE=1。
+ - 引擎初始化优化：默认采用识别分支（rec=True, det=False）以降低模型加载与内存占用；默认关闭 PaddleX 离线/缓存猴子补丁以减少额外预加载。
   - 如必须在桌面应用中运行，尽量添加 -S -E 或设置 PYTHONNOUSERSITE=1。
 
 时间分隔识别与自定义规则

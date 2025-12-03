@@ -1,5 +1,5 @@
 """
-OCR processing module for WeChatMsgGrabber.
+OCR processing module for WeChatMsgGraber.
 Handles PaddleOCR integration and image text recognition.
 """
 import time
@@ -64,6 +64,9 @@ class OCRProcessor:
         # - 在 cleanup() 中统一清理该缓存。
         self._region_results_cache: "OrderedDict[str, List[Tuple[TextRegion, OCRResult]]]" = OrderedDict()
         self._region_cache_max_items: int = self._cache_max_items
+        self._full_image_cache_meta: Dict[str, Dict[str, Any]] = {}
+        self._region_cache_meta: Dict[str, Dict[str, Any]] = {}
+        self._perceptual_threshold: int = 8
 
         # 运行时性能指标与缓存统计
         # 函数级注释：
@@ -131,20 +134,43 @@ class OCRProcessor:
         self._requests_httpadapter_send_original = None
 
     def _get_image_hash(self, image: Image.Image) -> str:
-        """Compute a stable hash for a PIL Image to use as cache key."""
+        """Compute 64-bit dHash plus size/mean to reduce collisions."""
         try:
-            # Convert to raw bytes in a deterministic format (RGB)
-            if image.mode != "RGB":
-                image = image.convert("RGB")
-            arr = np.array(image)
-            # Hash the pixel data with shape to avoid collisions
-            h = hashlib.md5()
-            h.update(arr.tobytes())
-            h.update(str(arr.shape).encode("utf-8"))
-            return h.hexdigest()
+            if image.mode != "L":
+                image = image.convert("L")
+            hs = 8
+            w, h = hs + 1, hs
+            img = image.resize((w, h), resample=Image.LANCZOS)
+            arr = np.asarray(img, dtype=np.uint8)
+            diff = arr[:, 1:] > arr[:, :-1]
+            bits = diff.flatten()
+            v = 0
+            for b in bits:
+                v = (v << 1) | int(bool(b))
+            # 附加原图尺寸与灰度均值，避免全黑/全白等特殊图像的碰撞
+            try:
+                W, H = image.size
+            except Exception:
+                W, H = (0, 0)
+            mean = int(float(arr.mean()))
+            return f"DH:{v:016x}-{W}x{H}-{mean:03d}"
         except Exception:
-            # Fallback to object id if hashing fails (rare); reduces cache effectiveness
-            return str(id(image))
+            return f"DH:{hash(image) & ((1<<64)-1):016x}-0x0-000"
+
+    def _hash_to_int(self, s: str) -> int:
+        try:
+            core = s.split(":", 1)[-1].split("-", 1)[0]
+            return int(core, 16)
+        except Exception:
+            return 0
+
+    def _hamdist(self, a: int, b: int) -> int:
+        x = a ^ b
+        c = 0
+        while x:
+            x &= x - 1
+            c += 1
+        return c
         
     def initialize_engine(self, config: Optional[OCRConfig] = None) -> bool:
         """
@@ -188,7 +214,10 @@ class OCRProcessor:
 
             # 在初始化 PaddleOCR 之前，按需启用 YAML 与 paddlex 的缓存猴子补丁
             try:
-                if bool(getattr(self.config, "enable_paddlex_yaml_cache", True)):
+                # 允许通过环境变量强制关闭 paddlex 相关补丁，以避免无意间引入额外模型加载
+                _disable_px_env = os.getenv("WECHATMSGG_DISABLE_PADDLEX_PATCHES", "0").lower() in ("1","true","yes","on")
+                _enable_yaml_cache = bool(getattr(self.config, "enable_paddlex_yaml_cache", True)) and not _disable_px_env
+                if _enable_yaml_cache:
                     # 1) 先启用通用的 PyYAML 加载缓存
                     self._enable_yaml_cache()
                     # 2) 再启用 paddlex readers 的读文件缓存
@@ -199,7 +228,8 @@ class OCRProcessor:
 
             # 可选：屏蔽 paddlex 官方模型网络探测，避免慢用例中的 HEAD 请求
             try:
-                if bool(getattr(self.config, "enable_paddlex_offline", True)):
+                _enable_offline = bool(getattr(self.config, "enable_paddlex_offline", True)) and not _disable_px_env
+                if _enable_offline:
                     self._enable_paddlex_offline()
             except Exception as _offe:
                 self.logger.debug(f"Enable paddlex offline patch failed (optional): {_offe}")
@@ -250,6 +280,9 @@ class OCRProcessor:
                         # GPU 开关从配置读取，Apple Silicon (macOS) 环境默认 False
                         "use_gpu": bool(getattr(self.config, "use_gpu", False)),
                         "show_log": False,
+                        # 资源友好：若 PaddleOCR 支持，在初始化阶段关闭 det，仅加载 rec 模型
+                        "det": False,
+                        "rec": True,
                     }
 
                     # 2) 测试环境兼容：如果 PaddleOCR 被 unittest.mock.Mock 替换，则直接传递完整参数
@@ -264,8 +297,10 @@ class OCRProcessor:
                     if is_mock:
                         # 单元测试兼容：历史测试期望 use_angle_cls=True，这里强制开启以满足断言
                         full_kwargs["use_angle_cls"] = True
-                        self.logger.debug("Detected mocked PaddleOCR; passing full expected kwargs for testing.")
-                        self.ocr_engine = _PaddleOCR(**full_kwargs)
+                        # 测试断言未包含 det/rec，移除以匹配期望
+                        test_kwargs = {k: v for k, v in full_kwargs.items() if k in ("lang","use_angle_cls","use_gpu","show_log")}
+                        self.logger.debug("Detected mocked PaddleOCR; passing expected kwargs for testing.")
+                        self.ocr_engine = _PaddleOCR(**test_kwargs)
                     else:
                         # 3) 运行时安全：仅向真实 PaddleOCR 传递其支持的参数，避免 TypeError
                         try:
@@ -815,6 +850,7 @@ class OCRProcessor:
             if not is_cropped_region and bool(getattr(self.config, "enable_full_image_cache", True)):
                 try:
                     raw_hash = self._get_image_hash(image)
+                    raw_dhash_int = self._hash_to_int(raw_hash)
                     opts_key = tuple(sorted((effective_opts or {}).items()))
                     key_tuple = (
                         "full",
@@ -840,6 +876,38 @@ class OCRProcessor:
                         except Exception:
                             pass
                         return cached_full
+                    # 可选的近似命中（感知哈希）：仅当显式开启时生效，默认关闭以保持保守行为
+                    try:
+                        enable_phash = os.getenv("WECHATMSGG_ENABLE_FULL_PHASH", "0").lower() in ("1","true","yes","on")
+                        th_env = os.getenv("WECHATMSGG_PHASH_THRESHOLD", "")
+                        th = int(th_env) if th_env.isdigit() else int(self._perceptual_threshold)
+                    except Exception:
+                        enable_phash = False
+                        th = int(self._perceptual_threshold)
+                    if enable_phash:
+                        for k, meta in list(self._full_image_cache_meta.items()):
+                            try:
+                                if meta.get("opts_key") != opts_key:
+                                    continue
+                                if meta.get("lang") != str(self.config.language):
+                                    continue
+                                if bool(meta.get("angle_cls")) != bool(getattr(self.config, "use_angle_cls", False)):
+                                    continue
+                                if bool(meta.get("preprocess")) != bool(preprocess):
+                                    continue
+                                dh = int(meta.get("dhash", 0))
+                                if self._hamdist(dh, raw_dhash_int) <= th:
+                                    cached_full = self._full_image_cache.get(k)
+                                    if cached_full is not None:
+                                        self._full_image_cache.move_to_end(k)
+                                        try:
+                                            with self._metrics_lock:
+                                                self._metrics["full_image_cache_hits"] += 1
+                                        except Exception:
+                                            pass
+                                        return cached_full
+                            except Exception:
+                                continue
                 except Exception:
                     full_cache_key = None
 
@@ -943,21 +1011,15 @@ class OCRProcessor:
 
                 # Step 1: try ocr(img_input) without explicit cls
                 try:
-                    # 若为裁剪区域，跳过检测阶段以减少重复开销（det=False）；整图保持默认 det=True
+                    # 统一使用识别分支（rec=True, det=False）以避免加载检测模型，降低内存占用
                     if is_cropped_region:
                         self.logger.debug("OCR: using engine.ocr() with det=False, rec=True for cropped region")
                         _t0 = time.time()
                         _res = engine.ocr(img_input, det=False, rec=True)
-                        try:
-                            with self._metrics_lock:
-                                self._metrics["ocr_engine_calls"] += 1
-                                self._metrics["ocr_engine_time_ms_total"] += (time.time() - _t0) * 1000.0
-                        except Exception:
-                            pass
-                        return _res
-                    self.logger.debug("OCR: using engine.ocr()")
-                    _t0 = time.time()
-                    _res = engine.ocr(img_input)
+                    else:
+                        self.logger.debug("OCR: using engine.ocr() with det=False, rec=True for full image")
+                        _t0 = time.time()
+                        _res = engine.ocr(img_input, det=False, rec=True)
                     try:
                         with self._metrics_lock:
                             self._metrics["ocr_engine_calls"] += 1
@@ -984,16 +1046,10 @@ class OCRProcessor:
                                 self.logger.debug(f"OCR: retrying engine.ocr() with det=False, rec=True, cls={cls_flag} for cropped region")
                                 _t1 = time.time()
                                 _res = engine.ocr(img_input, det=False, rec=True, cls=cls_flag)
-                                try:
-                                    with self._metrics_lock:
-                                        self._metrics["ocr_engine_calls"] += 1
-                                        self._metrics["ocr_engine_time_ms_total"] += (time.time() - _t1) * 1000.0
-                                except Exception:
-                                    pass
-                                return _res
-                            self.logger.debug(f"OCR: retrying engine.ocr() with cls={cls_flag}")
-                            _t1 = time.time()
-                            _res = engine.ocr(img_input, cls=cls_flag)
+                            else:
+                                self.logger.debug(f"OCR: retrying engine.ocr() with det=False, rec=True, cls={cls_flag} for full image")
+                                _t1 = time.time()
+                                _res = engine.ocr(img_input, det=False, rec=True, cls=cls_flag)
                             try:
                                 with self._metrics_lock:
                                     self._metrics["ocr_engine_calls"] += 1
@@ -1091,6 +1147,16 @@ class OCRProcessor:
                 try:
                     self._full_image_cache[full_cache_key] = result_obj
                     self._full_image_cache.move_to_end(full_cache_key)
+                    try:
+                        self._full_image_cache_meta[full_cache_key] = {
+                            "dhash": raw_dhash_int,
+                            "opts_key": opts_key,
+                            "lang": str(self.config.language),
+                            "angle_cls": bool(getattr(self.config, "use_angle_cls", False)),
+                            "preprocess": bool(preprocess),
+                        }
+                    except Exception:
+                        pass
                     if len(self._full_image_cache) > self._full_cache_max_items:
                         self._full_image_cache.popitem(last=False)
                         try:
@@ -1621,8 +1687,9 @@ class OCRProcessor:
 
                 # Step 1: try ocr(img_input) without explicit cls
                 try:
-                    self.logger.debug("OCR(regions): using engine.ocr()")
-                    return engine.ocr(img_input)
+                    # 区域识别同样仅启用识别分支，避免加载检测模型
+                    self.logger.debug("OCR(regions): using engine.ocr() with det=False, rec=True")
+                    return engine.ocr(img_input, det=False, rec=True)
                 except TypeError as te:
                     msg = str(te)
                     need_cls = "missing 1 required positional argument" in msg and "cls" in msg
@@ -1635,8 +1702,8 @@ class OCRProcessor:
                     if need_cls:
                         try:
                             cls_flag = bool(getattr(self.config, "use_angle_cls", False))
-                            self.logger.debug(f"OCR(regions): retrying engine.ocr() with cls={cls_flag}")
-                            return engine.ocr(img_input, cls=cls_flag)
+                            self.logger.debug(f"OCR(regions): retrying engine.ocr() with det=False, rec=True, cls={cls_flag}")
+                            return engine.ocr(img_input, det=False, rec=True, cls=cls_flag)
                         except Exception:
                             pass
                 except Exception:
@@ -1836,6 +1903,113 @@ class OCRProcessor:
         except Exception as e:
             self.logger.error(f"Enhanced confidence calculation failed: {e}")
             return result.confidence
+
+    # ---- 媒体气泡（图片/贴图）启发式与几何工具函数 ----
+    def _rect_iou(self, a: Rectangle, b: Rectangle) -> float:
+        """
+        计算两个矩形的 IoU（Intersection over Union）。
+
+        函数级注释：
+        - 使用像素级坐标计算交并比；
+        - 自动处理不相交与零面积情形，返回 0.0；
+        - 该函数用于候选区域与已有文本区域之间的去重。
+        """
+        try:
+            ax1, ay1 = a.x, a.y
+            ax2, ay2 = a.x + max(a.width, 0), a.y + max(a.height, 0)
+            bx1, by1 = b.x, b.y
+            bx2, by2 = b.x + max(b.width, 0), b.y + max(b.height, 0)
+            ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+            ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+            iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+            inter = iw * ih
+            ua = max(0, (ax2 - ax1)) * max(0, (ay2 - ay1))
+            ub = max(0, (bx2 - bx1)) * max(0, (by2 - by1))
+            union = ua + ub - inter
+            if union <= 0:
+                return 0.0
+            return float(inter) / float(union)
+        except Exception:
+            return 0.0
+
+    def _is_likely_media_bubble(
+        self,
+        rect: Rectangle,
+        image_size: Tuple[int, int],
+        typical_text_metrics: Tuple[float, float, float],
+        cropped_img: Optional[Image.Image] = None,
+    ) -> bool:
+        """
+        启发式判断一个“无文字区域”是否更像图片/贴图气泡。
+
+        函数级注释：
+        - 结合绝对尺寸阈值、相对整图面积、与文本区域中位尺寸比较、长宽比过滤、边缘密度加分；
+        - 采用保守判定，尽量减少误判为媒体气泡。
+
+        参数：
+        - rect: 区域矩形
+        - image_size: 整图尺寸 (W, H)
+        - typical_text_metrics: (文本宽度中位数, 高度中位数, 面积中位数)，若无文本则可能为 (0, 0, 0)
+        - cropped_img: 区域裁剪图（可选），用于边缘密度评估
+        """
+        try:
+            w, h = max(0, rect.width), max(0, rect.height)
+            if w == 0 or h == 0:
+                return False
+            img_w, img_h = image_size
+            area = w * h
+            rel_area = area / max(img_w * img_h, 1)
+
+            med_w, med_h, med_a = typical_text_metrics if typical_text_metrics else (0.0, 0.0, 0.0)
+
+            # 绝对尺寸过滤：过小区域大概率是噪声
+            if min(w, h) < 46:
+                return False
+            # 相对整图面积：至少超过 0.5%
+            if rel_area < 0.005:
+                return False
+
+            # 与文本区域中位尺寸比较：显著更大则可能是媒体气泡
+            bigger_than_text = False
+            if med_w > 0 and w >= (med_w * 1.6):
+                bigger_than_text = True
+            if med_h > 0 and h >= (med_h * 1.6):
+                bigger_than_text = True
+            if med_a > 0 and area >= (med_a * 2.4):
+                bigger_than_text = True
+
+            # 无文本区域时，采用保守绝对阈值
+            if med_w == 0 and med_h == 0 and med_a == 0:
+                if min(w, h) >= 64 or area >= 6000:
+                    bigger_than_text = True
+
+            if not bigger_than_text:
+                return False
+
+            # 长宽比过滤：过于扁长更像文本行，图片/贴图通常在 0.5~2.5 之间
+            aspect = (w / max(h, 1))
+            if not (0.5 <= aspect <= 2.5):
+                return False
+
+            # 边缘密度（加分项）：图片/贴图常具有较多边缘结构
+            try:
+                if cropped_img is not None:
+                    arr = np.array(cropped_img)
+                    if arr.ndim == 3:
+                        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+                    else:
+                        gray = arr.astype(np.uint8)
+                    edges = cv2.Canny(gray, 50, 150)
+                    density = float(np.count_nonzero(edges)) / float(edges.size)
+                    if density < 0.02:
+                        return False
+            except Exception:
+                # 边缘提取失败不影响主判定
+                pass
+
+            return True
+        except Exception:
+            return False
     
     def detect_and_process_regions(self, image: Image.Image, max_regions: int = 25) -> List[Tuple[TextRegion, OCRResult]]:
         """
@@ -1904,7 +2078,9 @@ class OCRProcessor:
                     reverse=True
                 )[:max_regions]
             
-            results = []
+            results: List[Tuple[TextRegion, OCRResult]] = []
+            # 收集“无文字”的候选区域，后续基于几何与相对尺寸进行媒体气泡（图片/贴图）判定
+            empty_candidates: List[Tuple[Rectangle, Image.Image, OCRResult]] = []
             
             for region_rect in detected_regions:
                 # Crop the region
@@ -1922,9 +2098,11 @@ class OCRProcessor:
                         pass
                     # Process the cropped region
                     # 裁剪区域采用轻量化预处理：默认关闭降噪，仅保留灰度转换以降低单区域开销
+                    max_side = max(int(region_rect.width), int(region_rect.height))
+                    dyn_reduce = bool(getattr(self.config, "preprocess_crop_reduce_noise", False)) or max_side >= 480
                     light_opts = {
                         "enhance_quality": bool(getattr(self.config, "preprocess_enhance_quality", True)),
-                        "reduce_noise_flag": bool(getattr(self.config, "preprocess_crop_reduce_noise", False)),
+                        "reduce_noise_flag": dyn_reduce,
                         "convert_grayscale": bool(getattr(self.config, "preprocess_crop_convert_grayscale", True)),
                         "noise_method": str(getattr(self.config, "preprocess_noise_method", "bilateral")),
                     }
@@ -1967,20 +2145,59 @@ class OCRProcessor:
                         pass
                 
                 # Create TextRegion with the detected rectangle and OCR text
-                if ocr_result.text.strip():  # Only include regions with text
+                if ocr_result.text.strip():  # 仅包含识别出文字的区域
                     text_region = TextRegion(
                         text=ocr_result.text,
                         bounding_box=region_rect,
                         confidence=ocr_result.confidence
                     )
-                    
                     results.append((text_region, ocr_result))
+                else:
+                    # 无文字：记录为候选，稍后统一进行“媒体气泡”几何判定
+                    empty_candidates.append((region_rect, cropped_image, ocr_result))
+
+            # 二次处理：对“无文字”的候选区域应用几何/相对尺寸启发式，生成占位 TextRegion
+            try:
+                # 统计已识别文本区域的典型尺寸（中位数），作为参考阈值
+                text_widths = [pair[0].bounding_box.width for pair in results]
+                text_heights = [pair[0].bounding_box.height for pair in results]
+                text_areas = [pair[0].bounding_box.width * pair[0].bounding_box.height for pair in results]
+                med_w = float(np.median(text_widths)) if text_widths else 0.0
+                med_h = float(np.median(text_heights)) if text_heights else 0.0
+                med_a = float(np.median(text_areas)) if text_areas else 0.0
+                typical = (med_w, med_h, med_a)
+                img_w, img_h = image.size
+
+                for rect, cropped_img, ocr_res in empty_candidates:
+                    if self._is_likely_media_bubble(rect, (img_w, img_h), typical, cropped_img):
+                        # 生成占位区域（空文本），保留置信度为低值以避免误导
+                        placeholder = TextRegion(
+                            text="",
+                            bounding_box=rect,
+                            confidence=max(float(getattr(ocr_res, "confidence", 0.0)), 0.05)
+                        )
+                        # 去重：避免与已有文本区域发生较大重叠（IoU 高）
+                        overlapped = False
+                        for existing, _ in results:
+                            iou = self._rect_iou(existing.bounding_box, rect)
+                            if iou >= 0.65:
+                                overlapped = True
+                                break
+                        if not overlapped:
+                            results.append((placeholder, ocr_res))
+            except Exception as ge:
+                # 启发式失败不影响主流程，记录调试日志
+                self.logger.debug(f"Empty-bubble heuristic failed: {ge}")
             
             self.logger.debug(f"Processed {len(results)} text regions separately")
             # 写入整图级区域结果缓存（包括空结果，重复图像可快速返回）
             try:
                 self._region_results_cache[full_key] = results
                 self._region_results_cache.move_to_end(full_key)
+                try:
+                    self._region_cache_meta[full_key] = {"dhash": dh_int}
+                except Exception:
+                    pass
                 if len(self._region_results_cache) > self._region_cache_max_items:
                     self._region_results_cache.popitem(last=False)
                     try:
@@ -2232,3 +2449,23 @@ class OCRProcessor:
                 self.logger.debug("Restored requests.adapters.HTTPAdapter.send")
         except Exception:
             pass
+            # 近似命中：使用感知哈希在区域结果缓存中查找
+            try:
+                dh_int = self._hash_to_int(full_key)
+                for k, meta in list(self._region_cache_meta.items()):
+                    try:
+                        dh2 = int(meta.get("dhash", 0))
+                        if self._hamdist(dh_int, dh2) <= int(self._perceptual_threshold):
+                            cached_regions = self._region_results_cache.get(k)
+                            if cached_regions is not None:
+                                self._region_results_cache.move_to_end(k)
+                                try:
+                                    with self._metrics_lock:
+                                        self._metrics["region_cache_hits"] += 1
+                                except Exception:
+                                    pass
+                                return cached_regions
+                    except Exception:
+                        continue
+            except Exception:
+                pass

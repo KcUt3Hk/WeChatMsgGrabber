@@ -1,5 +1,27 @@
 import argparse
 import logging
+import sys
+import os
+
+# 确保项目根目录在 Python 路径中，避免作为脚本运行时的模块导入失败
+def _bootstrap_sys_path():
+    """将项目根目录加入 sys.path 以确保 controllers/services 等包可被导入。
+
+    函数级注释：
+    - 当直接从 cli 目录运行脚本时，默认的工作目录可能不包含项目根目录；
+    - 通过计算当前文件的上级目录（项目根）并插入到 sys.path 的前端，
+      保证诸如 controllers、services、models 等包均可被正确解析导入；
+    - 该函数在模块导入阶段即调用，避免后续 main() 执行时出现 ModuleNotFoundError。
+    """
+    try:
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+    except Exception:
+        # 安静失败，不影响后续流程（测试环境通常已有正确的 sys.path）
+        pass
+
+_bootstrap_sys_path()
 
 from controllers.main_controller import MainController
 from services.config_manager import ConfigManager
@@ -66,8 +88,8 @@ def main():
         * --exclude-time-only 过滤纯时间/日期分隔消息（例如 “10月21日23:47”、“星期四” 等）
         * --aggressive-dedup 启用激进去重（基于 sender+content 的内容级去重）
     - 过滤器支持按发件人、时间范围、类型、内容包含、最小置信度等。
-    """
-    parser = argparse.ArgumentParser(description="WeChatMsgGrabber")
+"""
+    parser = argparse.ArgumentParser(description="WeChatMsgGraber")
     parser.add_argument("--prefix", default="extraction", help="filename prefix for output")
     parser.add_argument("--retry", action="store_true", help="use retry mechanism")
     parser.add_argument("--attempts", type=int, default=3, help="max retry attempts")

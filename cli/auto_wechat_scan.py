@@ -73,6 +73,7 @@ def parse_cli_args():
     parser.add_argument('--direction', choices=['up', 'down'], default='up', help='滚动方向')
     parser.add_argument('--max-scrolls', type=int, default=60, help='最大滚动次数')
     parser.add_argument('--max-scrolls-per-minute', type=int, default=40, help='每分钟滚动上限')
+    parser.add_argument('--spm-range', help='每分钟滚动数量区间，格式: min,max（优先生效）')
     parser.add_argument('--full-fetch', action='store_true', help='尽可能一次性抓取全部聊天内容（大幅提高滚动上限并在到达边缘时停止）')
     parser.add_argument('--go-top-first', action='store_true', help='扫描前先滚动到聊天记录顶部（配合 direction=down 可自顶向下全量覆盖）')
     parser.add_argument('--scroll-delay', type=float, help='滚动延迟秒数（留空自动估算）')
@@ -194,6 +195,15 @@ def main():
     # 执行高级扫描
     # 执行高级扫描（必要时进行一次轻量重试以避免偶发中断）
     messages = []
+    # 解析 spm-range
+    spm_range = None
+    try:
+        if args.spm_range:
+            parts = [p.strip() for p in args.spm_range.split(',')]
+            if len(parts) == 2:
+                spm_range = (int(parts[0]), int(parts[1]))
+    except Exception:
+        spm_range = None
     attempts = 1 if not args.full_fetch else 2
     for attempt in range(attempts):
         try:
@@ -208,6 +218,7 @@ def main():
                 scroll_distance_range=distance_range,
                 scroll_interval_range=interval_range,
                 max_scrolls_per_minute=args.max_scrolls_per_minute,
+                spm_range=spm_range,
             )
             # 合并并去重（基于 stable_key）
             seen = {m.stable_key() for m in messages}

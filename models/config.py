@@ -28,7 +28,7 @@ class OCRConfig:
     # 说明：
     # - 对聊天截图等高分辨率图片，下采样到合理尺寸（如 1280）通常不影响可读性，能显著加速；
     # - 设置为 0 或 None 可禁用该缩放。
-    preprocess_max_side: int = 1280
+    preprocess_max_side: int = 1600
 
     # 预处理开关（作用于裁剪区域的识别流程）。
     # 裁剪区域通常较小，降噪收益有限且开销相对更高，建议默认关闭。
@@ -63,13 +63,13 @@ class OCRConfig:
     # - 在慢用例中，paddlex 的 load_config 会频繁读取同一 YAML 文件并解析，带来大量 YAML 扫描与 IO 开销；
     # - 开启后对 paddlex.inference.utils.io.readers.read/read_file 做轻量缓存，显著减少重复解析；
     # - 如需严格保持第三方函数的原始行为（例如调试第三方库），可关闭。
-    enable_paddlex_yaml_cache: bool = True
+    enable_paddlex_yaml_cache: bool = False
 
     # 是否启用 paddlex 官方模型离线模式（猴子补丁）。
     # 说明：
     # - 跳过 official_models.is_available 的网络请求，避免慢用例中 requests.head 的阻塞；
     # - 对离线环境或 CI 场景尤为有益；如需真实网络探测可关闭。
-    enable_paddlex_offline: bool = True
+    enable_paddlex_offline: bool = False
 
     # 是否启用整图 OCR 结果的内存 LRU 缓存。
     # 说明：

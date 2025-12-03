@@ -542,7 +542,7 @@ def main() -> int:
     返回：
     - 进程退出码（0 表示成功，非 0 表示失败）
     """
-    print("WeChatMsgGrabber - 测试快捷入口")
+print("WeChatMsgGraber - 测试快捷入口")
     print("=" * 60)
 
     # 检查项目路径与解释器路径

@@ -1,0 +1,17 @@
+{
+  "app": {
+    "scroll_speed": 2,
+    "scroll_delay": 1.0,
+    "max_retry_attempts": 3
+  },
+  "ocr": {
+    "language": "ch",
+    "confidence_threshold": 0.7
+  },
+  "output": {
+    "format": "json",
+    "directory": "./output",
+    "enable_deduplication": true,
+    "formats": ["json", "csv", "md"]
+  }
+}
