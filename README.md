@@ -175,7 +175,7 @@ def demo_scan_multiple_chats() -> list[Message]:
     """
     ctrl = MainController()
     return ctrl.scan_multiple_chats(
-        chat_titles=["产品群", "项目讨论", "同事小王"],
+        chat_titles=["群A", "讨论B", "联系人C"],
         per_chat_max_messages=200,
         direction="up",
         formats=["json", "csv", "md"],

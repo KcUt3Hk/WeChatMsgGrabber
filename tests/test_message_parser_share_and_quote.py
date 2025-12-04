@@ -71,7 +71,7 @@ class TestShareAndQuote:
     def test_quote_detection_and_sanitize(self):
         # 右侧（我）回复，引用对方内容
         lines = [
-            "小王🙂",
+            "好友A🙂",
             "明天见",
             "好的",
             "12:30",
@@ -80,7 +80,7 @@ class TestShareAndQuote:
         assert len(msgs) == 1
         m = msgs[0]
         assert m.quote_meta is not None
-        assert m.quote_meta.original_nickname.startswith("小王")
+        assert m.quote_meta.original_nickname.startswith("好友A")
         assert m.quote_meta.original_sender_label == "对方"
         assert m.quote_meta.quoted_text == "明天见"
         # 内容已剔除昵称与时间戳，仅保留纯文本
