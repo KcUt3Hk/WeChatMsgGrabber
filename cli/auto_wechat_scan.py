@@ -339,6 +339,21 @@ def main():
         print(f"累计消息数：{len(messages)}条")
         print(f"我的消息数：{my_count}条")
         print(f"对方消息数：{other_count}条")
+
+        # 同步写入日志文件（通过 LoggingManager 的文件处理器）
+        lg = logging.getLogger(__name__)
+        lg.info("=== 任务总结 ===")
+        lg.info("开始时间：%s", start_dt.strftime('%m月%d日%H:%M'))
+        lg.info("结束时间：%s", end_dt.strftime('%m月%d日%H:%M'))
+        lg.info("耗时：%d小时%d分钟%d秒", hh, mm, ss)
+        lg.info("累计滚动次数：%d次", total_scrolls)
+        lg.info("每分钟滚动次数：%.1f次", spm)
+        lg.info("消息时长：%d天", msg_days)
+        lg.info("最长连续：%d天", longest_streak)
+        lg.info("最长间隔：%d天", longest_gap)
+        lg.info("累计消息数：%d条", len(messages))
+        lg.info("我的消息数：%d条", my_count)
+        lg.info("对方消息数：%d条", other_count)
     except Exception as e:
         logging.getLogger(__name__).debug(f"任务总结生成失败：{e}")
 
