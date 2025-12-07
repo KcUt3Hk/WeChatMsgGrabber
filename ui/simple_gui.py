@@ -67,6 +67,8 @@ class SimpleWechatGUI:
         self.var_go_top_first = tk.BooleanVar(value=False)
         self.var_skip_empty = tk.BooleanVar(value=True)
         self.var_verbose = tk.BooleanVar(value=True)
+        self.var_no_dedup = tk.BooleanVar(value=False)
+        self.var_clear_dedup = tk.BooleanVar(value=False)
         self.var_ocr_lang = tk.StringVar(value="ch")
         self.var_output_dir = tk.StringVar(value=os.path.join(PROJECT_ROOT, "output"))
         self.var_filename_prefix = tk.StringVar(value="auto_wechat_scan")
@@ -165,6 +167,8 @@ class SimpleWechatGUI:
         ttk.Checkbutton(frm, text="skip-empty", variable=self.var_skip_empty).grid(row=row, column=2, sticky=tk.EW)
         ttk.Checkbutton(frm, text="verbose", variable=self.var_verbose).grid(row=row, column=3, sticky=tk.EW)
         ttk.Button(frm, text="打开输出目录", command=self.on_open_output).grid(row=row, column=4, sticky=tk.EW)
+        ttk.Checkbutton(frm, text="禁用去重", variable=self.var_no_dedup).grid(row=row, column=5, sticky=tk.W)
+        ttk.Checkbutton(frm, text="清空去重索引", variable=self.var_clear_dedup).grid(row=row, column=6, sticky=tk.W)
 
         # 第七行：操作按钮
         row += 1
@@ -242,6 +246,10 @@ class SimpleWechatGUI:
             cmd.append("--skip-empty")
         if self.var_verbose.get():
             cmd.append("--verbose")
+        if self.var_no_dedup.get():
+            cmd.append("--no-dedup")
+        if self.var_clear_dedup.get():
+            cmd.append("--clear-dedup-index")
         if self.var_scroll_delay.get().strip():
             cmd += ["--scroll-delay", self.var_scroll_delay.get().strip()]
         if self.var_spm_range.get().strip():

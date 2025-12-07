@@ -486,13 +486,19 @@ class AdvancedScrollController(AutoScrollController):
             return {}
         
         total_messages = sum(state.get("message_count", 0) for state in self.scroll_history)
-        total_time = time.time() - self.start_time if self.start_time else 0
+        end_ts = time.time()
+        start_ts = self.start_time or end_ts
+        total_time = max(0.0, end_ts - start_ts)
+        per_minute = (len(self.scroll_history) / (total_time / 60.0)) if total_time > 0 else 0.0
         
         return {
+            "start_time": start_ts,
+            "end_time": end_ts,
             "total_scrolls": len(self.scroll_history),
             "total_messages": total_messages,
             "total_time": total_time,
             "avg_messages_per_scroll": total_messages / len(self.scroll_history) if self.scroll_history else 0,
+            "scrolls_per_minute": per_minute,
             "scroll_speed": self.scroll_speed,
             "scroll_delay": self.scroll_delay
         }

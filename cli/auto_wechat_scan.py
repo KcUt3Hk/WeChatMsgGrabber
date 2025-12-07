@@ -280,6 +280,83 @@ def main():
             short = short[:60] + ('...' if len(short) > 60 else '')
             print(f"{i+1}. [{msg.sender}] {short}")
 
+    # 任务总结
+    try:
+        from datetime import datetime, timezone
+        stats = controller.get_last_scroll_stats() or {}
+        start_ts = stats.get("start_time")
+        end_ts = stats.get("end_time") or (start_ts or datetime.now().timestamp())
+        # 允许没有统计时的回退
+        if start_ts and isinstance(start_ts, (int, float)):
+            start_dt = datetime.fromtimestamp(start_ts)
+        else:
+            start_dt = datetime.now()
+        if end_ts and isinstance(end_ts, (int, float)):
+            end_dt = datetime.fromtimestamp(end_ts)
+        else:
+            end_dt = datetime.now()
+        elapsed_sec = int(max(0.0, (end_dt - start_dt).total_seconds()))
+        hh = elapsed_sec // 3600
+        mm = (elapsed_sec % 3600) // 60
+        ss = elapsed_sec % 60
+        total_scrolls = int(stats.get("total_scrolls", 0))
+        spm = float(stats.get("scrolls_per_minute", 0.0))
+
+        # 消息统计
+        def _date(d):
+            try:
+                return d.date()
+            except Exception:
+                return None
+        dates = sorted({ _date(m.timestamp) for m in messages if _date(m.timestamp) })
+        msg_days = ( (dates[-1] - dates[0]).days + 1 ) if dates else 0
+        # 连续与间隔
+        longest_streak = 0
+        longest_gap = 0
+        if dates:
+            streak = 1
+            for i in range(1, len(dates)):
+                diff = (dates[i] - dates[i-1]).days
+                if diff == 1:
+                    streak += 1
+                else:
+                    longest_streak = max(longest_streak, streak)
+                    streak = 1
+                    longest_gap = max(longest_gap, diff-1)
+            longest_streak = max(longest_streak, streak)
+        my_count = sum(1 for m in messages if (m.sender or "") == "我")
+        other_count = sum(1 for m in messages if (m.sender or "") == "对方")
+
+        print("\n=== 任务总结 ===")
+        print(f"开始时间：{start_dt.strftime('%m月%d日%H:%M')} ")
+        print(f"结束时间：{end_dt.strftime('%m月%d日%H:%M')} ")
+        print(f"耗时：{hh}小时{mm}分钟{ss}秒")
+        print(f"累计滚动次数：{total_scrolls}次")
+        print(f"每分钟滚动次数：{spm:.1f}次")
+        print(f"消息时长：{msg_days}天")
+        print(f"最长连续：{longest_streak}天")
+        print(f"最长间隔：{longest_gap}天")
+        print(f"累计消息数：{len(messages)}条")
+        print(f"我的消息数：{my_count}条")
+        print(f"对方消息数：{other_count}条")
+
+        # 同步写入日志文件（通过 LoggingManager 的文件处理器）
+        lg = logging.getLogger(__name__)
+        lg.info("=== 任务总结 ===")
+        lg.info("开始时间：%s", start_dt.strftime('%m月%d日%H:%M'))
+        lg.info("结束时间：%s", end_dt.strftime('%m月%d日%H:%M'))
+        lg.info("耗时：%d小时%d分钟%d秒", hh, mm, ss)
+        lg.info("累计滚动次数：%d次", total_scrolls)
+        lg.info("每分钟滚动次数：%.1f次", spm)
+        lg.info("消息时长：%d天", msg_days)
+        lg.info("最长连续：%d天", longest_streak)
+        lg.info("最长间隔：%d天", longest_gap)
+        lg.info("累计消息数：%d条", len(messages))
+        lg.info("我的消息数：%d条", my_count)
+        lg.info("对方消息数：%d条", other_count)
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"任务总结生成失败：{e}")
+
     try:
         reporter.stop_heartbeat()
     except Exception:
