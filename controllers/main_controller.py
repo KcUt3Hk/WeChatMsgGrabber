@@ -28,6 +28,7 @@ class MainController:
         self.pre = ImagePreprocessor()
         self.ocr = OCRProcessor()
         self.parser = MessageParser()
+        self.last_scroll_stats: dict | None = None
 
     def run_once(self) -> List[Message]:
         """Run a single extraction cycle on current chat view.
@@ -531,6 +532,10 @@ class MainController:
                     )
 
             self.logger.info(f"高级扫描完成，共提取 {len(messages)} 条唯一消息")
+            try:
+                self.last_scroll_stats = advanced_scroll.get_scroll_statistics()
+            except Exception:
+                self.last_scroll_stats = None
 
         except KeyboardInterrupt:
             self.logger.info("用户中断高级扫描")
@@ -541,6 +546,9 @@ class MainController:
             reporter.finish(success=bool(messages))
 
         return messages
+
+    def get_last_scroll_stats(self) -> dict | None:
+        return self.last_scroll_stats
 
     def scan_multiple_chats(
         self,
