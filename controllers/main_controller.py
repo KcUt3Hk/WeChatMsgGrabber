@@ -372,6 +372,91 @@ class MainController:
         
         self.logger.info("滑动到顶部完成")
 
+    def _fill_message_times(self, messages: List[Message], direction: str = "up") -> None:
+        """Post-process messages to fill in 'message_time' based on System timestamps.
+        
+        Logic:
+        1. Sort messages in chronological order (Oldest -> Newest).
+           - If direction='up' (scanning history), the captured list is [Newest...Oldest]. So reverse it.
+           - If direction='down' (scanning new), the captured list is [Oldest...Newest]. Keep it.
+           - Actually, let's rely on capture timestamp if available? 
+             Capture timestamp for 'up' scan: Index 0 (Newest) has EARLIEST capture time? 
+             Wait, if we scroll UP, we capture Newest first.
+             So Index 0 is Newest. Index N is Oldest.
+             So Index 0 was captured at T0. Index N captured at T1.
+             So T0 < T1.
+             So Capture Time: Index 0 (Oldest timestamp) -> Index N (Newest timestamp).
+             BUT Semantic Time: Index 0 (Newest Msg) -> Index N (Oldest Msg).
+             So Capture Time is INVERSE to Semantic Time for 'up' scan.
+        
+        2. Iterate Oldest -> Newest.
+        3. Maintain current context date/time.
+        4. If System msg with time found, update context.
+        5. Assign context to subsequent messages.
+        """
+        if not messages:
+            return
+
+        # Determine processing order to be Old -> New
+        # If direction is 'up' (default), messages are [Newest ... Oldest].
+        # So we need to process in REVERSE order to go Old -> New.
+        # If direction is 'down', messages are [Oldest ... Newest].
+        
+        # However, advanced_scan_chat_history might return them in capture order.
+        # Let's assume the list `messages` is in Capture Order.
+        # If direction='up': Capture Order = New -> Old.
+        # If direction='down': Capture Order = Old -> New.
+        
+        ordered_indices = range(len(messages))
+        if direction == "up":
+            ordered_indices = range(len(messages) - 1, -1, -1)
+        
+        current_time = datetime.now()
+        # Initial guess: Scan start time? Or just use Now.
+        # Better: Scan backwards (New->Old) to find the FIRST system timestamp?
+        # No, System timestamps appear ABOVE messages (Old side).
+        # So we must traverse Old -> New.
+        
+        # We need a reference date. Usually Today.
+        scan_date = datetime.now()
+        current_context_time = scan_date
+        
+        # Traverse Old -> New
+        for i in ordered_indices:
+            msg = messages[i]
+            if msg.message_type == MessageType.SYSTEM:
+                # Try to parse
+                parsed = MessageParser.parse_wechat_time(msg.content, scan_date)
+                # If parsed time is different from reference (meaning it found a time), update context
+                # Note: parse_wechat_time returns reference_date if failure.
+                # But we might have "Yesterday 10:00".
+                # To detect if it WAS parsed, we can check if it's different OR check content pattern again?
+                # The parser logic already handles this.
+                # But wait, if we pass scan_date, and it returns scan_date, we don't know if it parsed "Today Now" or failed.
+                # But "System" messages usually contain time.
+                # Let's assume if it's System, we update context.
+                # But sometimes System msg is "You recalled a message".
+                # We should only update if it looks like time.
+                
+                # Check if it looks like time (using the parser's internal helper would be nice, but it's private)
+                # We'll just trust parse_wechat_time to return a reasonable time.
+                # To be safe, let's only update if the content looks like time.
+                # Re-implement simple check? Or make `_is_timestamp_line` public?
+                # I'll rely on the fact that if it parses, it's good.
+                # But we need to distinguish "Failed to parse" (returned ref date) from "Parsed Today".
+                # We can check if content matches time patterns.
+                
+                is_time = False
+                import re
+                pats = [r"\d{1,2}:\d{2}", r"昨天", r"今天", r"星期", r"年.+月.+日"]
+                if any(re.search(p, msg.content) for p in pats):
+                    parsed = MessageParser.parse_wechat_time(msg.content, scan_date)
+                    current_context_time = parsed
+                    msg.message_time = current_context_time
+            else:
+                # Assign current context time
+                msg.message_time = current_context_time
+
     def advanced_scan_chat_history(
         self,
         max_scrolls: int = 100,
@@ -532,6 +617,10 @@ class MainController:
                     )
 
             self.logger.info(f"高级扫描完成，共提取 {len(messages)} 条唯一消息")
+            
+            # Post-process to fill message times
+            self._fill_message_times(messages, direction=direction)
+            
             try:
                 self.last_scroll_stats = advanced_scroll.get_scroll_statistics()
             except Exception:

@@ -126,8 +126,7 @@ def build_sensitive_patterns() -> Tuple[List[str], List[Tuple[str, re.Pattern]],
     """
     # 错误级别：精确字符串
     exact_errors: List[str] = [
-        "/Users/pankkkk",  # 用户私有用户名（精确命中）
-        "/Users/pankkkk/Projects/Setting/python_envs/bin/python3.12",  # 用户私有解释器路径
+        # 在此处添加特定的高危字符串（如硬编码的 API Key、特定路径等）
     ]
 
     # 错误级别：正则表达式
