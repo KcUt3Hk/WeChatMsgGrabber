@@ -48,7 +48,7 @@ class SimpleWechatGUI:
     def __init__(self, root: tk.Tk):
         """初始化 GUI 组件与默认值"""
         self.root = root
-        self.root.title("WeChat OCR 简易前端")
+        self.root.title("WeChat OCR 简易前端 (v2.1 Layout)")
         self.preview_image = None
         self.paused = False
         self.log_file = None
@@ -98,115 +98,208 @@ class SimpleWechatGUI:
             pass
 
     def _build_layout(self):
-        """构建界面布局与控件"""
-        frm = ttk.Frame(self.root, padding=10)
-        frm.pack(fill=tk.BOTH, expand=True)
-        try:
-            for i in range(0, 10):
-                frm.columnconfigure(i, weight=1)
-        except Exception:
-            pass
+        """构建界面布局与控件（v2.1 垂直流式布局，适合窄窗口）"""
+        # 使用 Canvas + Scrollbar 实现可滚动的主容器，避免内容过多被截断
+        main_canvas = tk.Canvas(self.root)
+        scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=main_canvas.yview)
+        scrollable_frame = ttk.Frame(main_canvas)
 
-        # 顶部状态与当前日志文件名
-        row = 0
-        ttk.Label(frm, text="状态:").grid(row=row, column=0, sticky=tk.W)
-        ttk.Label(frm, textvariable=self.var_status).grid(row=row, column=1, sticky=tk.W)
-        ttk.Label(frm, text="当前扫描日志:").grid(row=row, column=2, sticky=tk.W)
-        ttk.Label(frm, textvariable=self.var_current_log).grid(row=row, column=3, columnspan=3, sticky=tk.W)
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: main_canvas.configure(scrollregion=main_canvas.bbox("all"))
+        )
+        
+        # 让 Canvas 内容宽度自适应窗口，减去滚动条宽度（约20px）避免水平滚动条出现
+        def _on_canvas_configure(e):
+             # 简单防抖：宽度变化大于 2px 才更新
+             current_width = main_canvas.itemcget(canvas_win, "width")
+             # itemcget 返回的是字符串 '123.0'
+             try:
+                 cur_w = float(current_width)
+             except:
+                 cur_w = 0
+             
+             new_w = e.width
+             if abs(new_w - cur_w) > 2:
+                 main_canvas.itemconfig(canvas_win, width=new_w)
+        
+        main_canvas.bind("<Configure>", _on_canvas_configure)
 
-        # 第一行：Python 解释器路径
-        row += 1
-        ttk.Label(frm, text="Python 解释器路径:").grid(row=row, column=0, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_python_bin, width=34).grid(row=row, column=1, columnspan=3, sticky=tk.EW, padx=6, pady=3)
-        ttk.Button(frm, text="自动检测", command=self.on_detect_python, width=10).grid(row=row, column=4, sticky=tk.EW, padx=6, pady=3)
+        canvas_win = main_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        main_canvas.configure(yscrollcommand=scrollbar.set)
 
-        # 第二行：窗口标题、聊天区域
-        row += 1
-        ttk.Label(frm, text="窗口标题（可选）:").grid(row=row, column=0, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_window_title, width=24).grid(row=row, column=1, sticky=tk.EW, padx=6, pady=3)
-        ttk.Label(frm, text="聊天区域坐标 x,y,w,h（可选）:").grid(row=row, column=2, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_chat_area, width=16).grid(row=row, column=3, sticky=tk.EW, padx=6, pady=3)
-        ttk.Button(frm, text="预览聊天区域", command=self.on_preview_chat_area, width=12).grid(row=row, column=4, sticky=tk.EW, padx=6, pady=3)
-        ttk.Button(frm, text="框选聊天区域", command=self.on_select_chat_area, width=12).grid(row=row, column=5, sticky=tk.EW, padx=6, pady=3)
+        main_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # 绑定鼠标滚轮事件
+        def _on_mousewheel(event):
+            # 避免在日志区、列表区等自带滚动的控件上触发全局滚动
+            try:
+                w = event.widget
+                # 检查控件类型，如果是 Text/Treeview/Listbox/Scrollbar 则忽略
+                if isinstance(w, (tk.Text, ttk.Treeview, tk.Listbox, ttk.Scrollbar)):
+                    return
+                # 也可以检查 winfo_class (例如 'Text', 'Treeview')
+                cls = w.winfo_class()
+                if cls in ('Text', 'Treeview', 'Listbox', 'Scrollbar', 'TScrollbar'):
+                    return
+            except Exception:
+                pass
 
-        # 第三行：滚动与 OCR
-        row += 1
-        ttk.Label(frm, text="方向:").grid(row=row, column=0, sticky=tk.W)
-        ttk.Combobox(frm, textvariable=self.var_direction, values=["up", "down"], width=6, state="readonly").grid(row=row, column=1, sticky=tk.EW)
-        ttk.Label(frm, text="scroll-delay（秒，可空）:").grid(row=row, column=2, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_scroll_delay, width=6).grid(row=row, column=3, sticky=tk.EW, padx=6, pady=3)
-        ttk.Label(frm, text="OCR 语言:").grid(row=row, column=4, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_ocr_lang, width=5).grid(row=row, column=5, sticky=tk.EW, padx=6, pady=3)
+            try:
+                # macOS 使用 delta (通常是像素级，值较大)
+                # Windows 使用 delta / 120 (通常是 120 的倍数)
+                if sys.platform == 'darwin':
+                    # 缩小滚动比例，防止过于灵敏导致“跳变”
+                    # delta 通常在 10~100 之间，除以 10~20 比较平滑
+                    steps = int(-1 * event.delta / 15)
+                    # 只有当 steps 不为 0 时才滚动，避免微小抖动
+                    if steps != 0:
+                        main_canvas.yview_scroll(steps, "units")
+                else:
+                    main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
+        
+        # 绑定到主窗口及所有子控件（除了 Text 和 Listbox 这种自带滚动的）
+        self.root.bind_all("<MouseWheel>", _on_mousewheel)
 
-        # 第四行：阈值与开关
-        row += 1
-        ttk.Label(frm, text="max-scrolls:").grid(row=row, column=0, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_max_scrolls, width=6).grid(row=row, column=1, sticky=tk.EW)
-        ttk.Label(frm, text="每分钟滚动 (spm):").grid(row=row, column=2, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_max_spm, width=6).grid(row=row, column=3, sticky=tk.EW)
-        ttk.Label(frm, text="spm范围(min,max，可选):").grid(row=row, column=4, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_spm_range, width=12).grid(row=row, column=5, sticky=tk.EW)
-        ttk.Checkbutton(frm, text="full-fetch", variable=self.var_full_fetch).grid(row=row, column=6, sticky=tk.W)
-        ttk.Checkbutton(frm, text="go-top-first", variable=self.var_go_top_first).grid(row=row, column=7, sticky=tk.W)
+        # 统一内边距
+        PAD_X = 8
+        PAD_Y = 4
+        
+        # 状态栏 (置顶)
+        status_frame = ttk.Frame(scrollable_frame, padding=PAD_X)
+        status_frame.pack(fill="x")
+        ttk.Label(status_frame, text="状态: ").pack(side="left")
+        ttk.Label(status_frame, textvariable=self.var_status, foreground="blue").pack(side="left")
+        
+        # === 1. 运行环境 ===
+        group_env = ttk.LabelFrame(scrollable_frame, text="1. 运行环境", padding=PAD_X)
+        group_env.pack(fill="x", padx=PAD_X, pady=PAD_Y)
+        
+        ttk.Label(group_env, text="Python 路径:").pack(anchor="w")
+        env_row = ttk.Frame(group_env)
+        env_row.pack(fill="x", pady=2)
+        ttk.Entry(env_row, textvariable=self.var_python_bin).pack(side="left", fill="x", expand=True)
+        ttk.Button(env_row, text="自动检测", command=self.on_detect_python, width=8).pack(side="right", padx=(4,0))
 
-        # 第五行：导出与目录
-        row += 1
-        ttk.Label(frm, text="导出格式:").grid(row=row, column=0, sticky=tk.W)
-        col = 1
+        # === 2. 扫描目标 ===
+        group_target = ttk.LabelFrame(scrollable_frame, text="2. 扫描目标", padding=PAD_X)
+        group_target.pack(fill="x", padx=PAD_X, pady=PAD_Y)
+        
+        # 窗口标题
+        ttk.Label(group_target, text="窗口标题 (可选):").pack(anchor="w")
+        ttk.Entry(group_target, textvariable=self.var_window_title).pack(fill="x", pady=(0, 4))
+        
+        # 聊天区域
+        ttk.Label(group_target, text="聊天区域 (x,y,w,h):").pack(anchor="w")
+        area_row = ttk.Frame(group_target)
+        area_row.pack(fill="x")
+        ttk.Entry(area_row, textvariable=self.var_chat_area).pack(side="left", fill="x", expand=True)
+        ttk.Button(area_row, text="预览", command=self.on_preview_chat_area, width=6).pack(side="left", padx=(8, 4))
+        ttk.Button(area_row, text="框选", command=self.on_select_chat_area, width=6).pack(side="left")
+
+        # === 3. 滚动控制 ===
+        group_scroll = ttk.LabelFrame(scrollable_frame, text="3. 滚动控制", padding=PAD_X)
+        group_scroll.pack(fill="x", padx=PAD_X, pady=PAD_Y)
+        
+        # Row 1: 方向 & 语言
+        s_r1 = ttk.Frame(group_scroll)
+        s_r1.pack(fill="x", pady=4)
+        ttk.Label(s_r1, text="方向:").pack(side="left")
+        ttk.Combobox(s_r1, textvariable=self.var_direction, values=["up", "down"], width=6, state="readonly").pack(side="left", padx=(4, 12))
+        ttk.Label(s_r1, text="OCR语言:").pack(side="left")
+        ttk.Entry(s_r1, textvariable=self.var_ocr_lang, width=5).pack(side="left", padx=4)
+        
+        # Row 2: 滚动次数 & 速率
+        s_r2 = ttk.Frame(group_scroll)
+        s_r2.pack(fill="x", pady=4)
+        ttk.Label(s_r2, text="最大滚动:").pack(side="left")
+        ttk.Entry(s_r2, textvariable=self.var_max_scrolls, width=6).pack(side="left", padx=(4, 12))
+        ttk.Label(s_r2, text="SPM(次/分):").pack(side="left")
+        ttk.Entry(s_r2, textvariable=self.var_max_spm, width=6).pack(side="left", padx=4)
+        
+        # Row 3: 动态速率
+        s_r3 = ttk.Frame(group_scroll)
+        s_r3.pack(fill="x", pady=4)
+        ttk.Label(s_r3, text="SPM范围(min,max):").pack(side="left")
+        ttk.Entry(s_r3, textvariable=self.var_spm_range, width=10).pack(side="left", padx=4)
+        
+        # === 4. 输出设置 ===
+        group_out = ttk.LabelFrame(scrollable_frame, text="4. 输出设置", padding=PAD_X)
+        group_out.pack(fill="x", padx=PAD_X, pady=PAD_Y)
+        
+        ttk.Label(group_out, text="输出目录:").pack(anchor="w")
+        dir_row = ttk.Frame(group_out)
+        dir_row.pack(fill="x", pady=2)
+        ttk.Entry(dir_row, textvariable=self.var_output_dir).pack(side="left", fill="x", expand=True)
+        ttk.Button(dir_row, text="选择", command=self.on_choose_output, width=6).pack(side="left", padx=(8, 4))
+        ttk.Button(dir_row, text="打开", command=self.on_open_output, width=6).pack(side="left")
+        
+        # 格式
+        fmt_row = ttk.Frame(group_out)
+        fmt_row.pack(fill="x", pady=6)
+        ttk.Label(fmt_row, text="格式:").pack(side="left", padx=(0, 8))
         for name in ["json", "csv", "md", "txt"]:
-            ttk.Checkbutton(frm, text=name, variable=self.format_vars[name]).grid(row=row, column=col, sticky=tk.EW)
-            col += 1
-        ttk.Label(frm, text="输出目录:").grid(row=row, column=4, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_output_dir, width=22).grid(row=row, column=5, sticky=tk.EW, padx=6, pady=3)
-        ttk.Button(frm, text="选择…", command=self.on_choose_output, width=8).grid(row=row, column=6, sticky=tk.EW, padx=6, pady=3)
+            ttk.Checkbutton(fmt_row, text=name, variable=self.format_vars[name]).pack(side="left", padx=8)
+            
+        # 前缀
+        pre_row = ttk.Frame(group_out)
+        pre_row.pack(fill="x", pady=4)
+        ttk.Label(pre_row, text="前缀:").pack(side="left")
+        ttk.Entry(pre_row, textvariable=self.var_filename_prefix, width=20).pack(side="left", padx=4, fill="x", expand=True)
 
-        # 第六行：文件名前缀与开关
-        row += 1
-        ttk.Label(frm, text="文件前缀:").grid(row=row, column=0, sticky=tk.W)
-        ttk.Entry(frm, textvariable=self.var_filename_prefix, width=16).grid(row=row, column=1, sticky=tk.EW, padx=6, pady=3)
-        ttk.Checkbutton(frm, text="skip-empty", variable=self.var_skip_empty).grid(row=row, column=2, sticky=tk.EW)
-        ttk.Checkbutton(frm, text="verbose", variable=self.var_verbose).grid(row=row, column=3, sticky=tk.EW)
-        ttk.Button(frm, text="打开输出目录", command=self.on_open_output).grid(row=row, column=4, sticky=tk.EW)
-        ttk.Checkbutton(frm, text="禁用去重", variable=self.var_no_dedup).grid(row=row, column=5, sticky=tk.W)
-        ttk.Checkbutton(frm, text="清空去重索引", variable=self.var_clear_dedup).grid(row=row, column=6, sticky=tk.W)
+        # === 5. 选项开关 ===
+        group_opt = ttk.LabelFrame(scrollable_frame, text="5. 选项开关", padding=PAD_X)
+        group_opt.pack(fill="x", padx=PAD_X, pady=PAD_Y)
+        
+        opt_r1 = ttk.Frame(group_opt)
+        opt_r1.pack(fill="x", anchor="w", pady=2)
+        ttk.Checkbutton(opt_r1, text="full-fetch", variable=self.var_full_fetch).pack(side="left", padx=8)
+        ttk.Checkbutton(opt_r1, text="go-top", variable=self.var_go_top_first).pack(side="left", padx=8)
+        ttk.Checkbutton(opt_r1, text="skip-empty", variable=self.var_skip_empty).pack(side="left", padx=8)
+        
+        opt_r2 = ttk.Frame(group_opt)
+        opt_r2.pack(fill="x", anchor="w", pady=2)
+        ttk.Checkbutton(opt_r2, text="verbose", variable=self.var_verbose).pack(side="left", padx=8)
+        ttk.Checkbutton(opt_r2, text="禁用去重", variable=self.var_no_dedup).pack(side="left", padx=8)
+        ttk.Checkbutton(opt_r2, text="清空去重索引", variable=self.var_clear_dedup).pack(side="left", padx=8)
 
-        # 第七行：操作按钮
-        row += 1
-        self.btn_start = ttk.Button(frm, text="开始扫描", command=self.on_start_scan, width=12)
-        self.btn_start.grid(row=row, column=0, sticky=tk.EW, padx=6, pady=4)
-        self.btn_stop = ttk.Button(frm, text="停止扫描", command=self.on_stop_scan, state="disabled", width=12)
-        self.btn_stop.grid(row=row, column=1, sticky=tk.EW, padx=6, pady=4)
-        self.btn_pause = ttk.Button(frm, text="暂停扫描", command=self.on_pause_resume, state="disabled", width=12)
-        self.btn_pause.grid(row=row, column=2, sticky=tk.EW, padx=6, pady=4)
-        ttk.Button(frm, text="复制命令", command=self.on_copy_command, width=12).grid(row=row, column=3, sticky=tk.EW, padx=6, pady=4)
-        ttk.Button(frm, text="保存配置", command=self.on_save_config, width=12).grid(row=row, column=4, sticky=tk.EW, padx=6, pady=4)
-        ttk.Button(frm, text="加载配置", command=self.on_load_config, width=12).grid(row=row, column=5, sticky=tk.EW, padx=6, pady=4)
-        ttk.Button(frm, text="从配置服务加载", command=self.on_load_from_server, width=14).grid(row=row, column=6, sticky=tk.EW, padx=6, pady=4)
-        ttk.Button(frm, text="退出", command=self.root.quit, width=8).grid(row=row, column=7, sticky=tk.EW, padx=6, pady=4)
-        ttk.Button(frm, text="查看最新导出", command=self.on_show_latest_exports, width=14).grid(row=row, column=8, sticky=tk.EW, padx=6, pady=4)
-        ttk.Button(frm, text="最新导出列表", command=self.on_open_latest_exports_window, width=14).grid(row=row, column=9, sticky=tk.EW, padx=6, pady=4)
-
-        # 预览图与日志
-        row += 1
-        self.preview_label = ttk.Label(frm, text="预览图将在此显示")
-        self.preview_label.grid(row=row, column=0, columnspan=3, sticky=tk.EW)
-        self.log_text = tk.Text(frm, height=20, width=120)
-        self.log_text.grid(row=row, column=3, columnspan=7, sticky=tk.NSEW)
-        try:
-            frm.rowconfigure(row, weight=1)
-        except Exception:
-            pass
-
-        # 第八行：消息样式预览（引用气泡“我/对方”标签）
-        row += 1
-        ttk.Label(frm, text="消息样式预览（引用气泡标签）:").grid(row=row, column=0, sticky=tk.W)
-        self.style_canvas = tk.Canvas(frm, width=540, height=160, bg="#ffffff", highlightthickness=1, highlightbackground="#e5eaf0")
-        self.style_canvas.grid(row=row, column=1, columnspan=6, sticky=tk.W, padx=(6,0))
-        try:
-            self._render_message_style_preview()
-        except Exception:
-            # 容错：若渲染失败不影响主流程
-            pass
+        # === 6. 操作区 ===
+        group_act = ttk.Frame(scrollable_frame, padding=PAD_X)
+        group_act.pack(fill="x", padx=PAD_X, pady=PAD_Y)
+        
+        # 核心按钮
+        self.btn_start = ttk.Button(group_act, text="开始扫描", command=self.on_start_scan)
+        self.btn_start.pack(fill="x", pady=6)
+        
+        act_row2 = ttk.Frame(group_act)
+        act_row2.pack(fill="x", pady=4)
+        self.btn_stop = ttk.Button(act_row2, text="停止", command=self.on_stop_scan, state="disabled")
+        self.btn_stop.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.btn_pause = ttk.Button(act_row2, text="暂停", command=self.on_pause_resume, state="disabled")
+        self.btn_pause.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        
+        # 辅助按钮
+        act_row3 = ttk.Frame(group_act)
+        act_row3.pack(fill="x", pady=6)
+        ttk.Button(act_row3, text="保存配置", command=self.on_save_config).pack(side="left", fill="x", expand=True, padx=4)
+        ttk.Button(act_row3, text="加载配置", command=self.on_load_config).pack(side="left", fill="x", expand=True, padx=4)
+        ttk.Button(act_row3, text="最新列表", command=self.on_open_latest_exports_window).pack(side="left", fill="x", expand=True, padx=4)
+        
+        # === 7. 日志与预览 ===
+        # 预览图
+        self.preview_label = ttk.Label(scrollable_frame, text="[预览图区域]")
+        self.preview_label.pack(pady=4)
+        
+        # 日志区
+        ttk.Label(scrollable_frame, text="运行日志:").pack(anchor="w", padx=PAD_X)
+        self.log_text = tk.Text(scrollable_frame, height=12, width=40)
+        self.log_text.pack(fill="x", padx=PAD_X, pady=(0, 10))
+        
+        # 底部留白
+        ttk.Label(scrollable_frame, text="").pack()
 
     def _get_formats(self) -> str:
         """收集导出格式复选框，拼接为逗号分隔字符串"""
@@ -357,7 +450,8 @@ class SimpleWechatGUI:
                 return
             bbox = (x, y, x + w, y + h)
             img = ImageGrab.grab(bbox=bbox)
-            img.thumbnail((400, 400))
+            # 限制最大宽度为 350，高度自适应，防止撑破窄窗口布局
+            img.thumbnail((350, 350))
             self.preview_image = ImageTk.PhotoImage(img)
             self.preview_label.configure(image=self.preview_image)
             self.preview_label.image = self.preview_image
@@ -473,7 +567,8 @@ class SimpleWechatGUI:
             img = ImageGrab.grab(bbox=bbox)
             os.makedirs(os.path.dirname(out_png), exist_ok=True)
             img.save(out_png)
-            img.thumbnail((400, 400))
+            # 限制最大宽度为 350，防止撑破窄窗口布局
+            img.thumbnail((350, 350))
             self.preview_image = ImageTk.PhotoImage(img)
             self.preview_label.configure(image=self.preview_image)
             self.preview_label.image = self.preview_image
@@ -545,6 +640,8 @@ class SimpleWechatGUI:
             real_h = int(h / scale)
             self.var_chat_area.set(f"{real_x},{real_y},{real_w},{real_h}")
             self._append_log(f"框选坐标: {self.var_chat_area.get()}")
+            # 自动更新预览图
+            self.root.after(100, self._update_preview_from_chat_area)
             top.destroy()
 
         canvas.bind("<ButtonPress-1>", on_press)
@@ -577,44 +674,58 @@ class SimpleWechatGUI:
         c.create_text(x2 + 12, y2 + 36, text="“请查看这段”", anchor=tk.W, fill="#1f2328", font=("Arial", 12))
 
     def _apply_responsive_layout(self):
-        """根据屏幕尺寸应用响应式布局（窗口宽度不超过屏幕宽度的60%）"""
+        """应用窗口布局：优先加载保存的尺寸，否则使用默认 500x1000 居中"""
         try:
+            # 允许自由调整大小
+            self.root.resizable(True, True)
+            
+            # 尝试从配置文件加载上次保存的窗口几何信息
+            saved_geometry = None
+            cfg_path = os.path.join(PROJECT_ROOT, "ui_config.json")
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        saved_geometry = data.get("geometry")
+                except Exception:
+                    pass
+
+            if saved_geometry:
+                self.root.geometry(saved_geometry)
+            else:
+                # 默认逻辑：500x1000 居中
+                self.root.update_idletasks()
+                sw = self.root.winfo_screenwidth()
+                sh = self.root.winfo_screenheight()
+                
+                target_w = 500
+                target_h = 1000
+                
+                # 确保不超过屏幕尺寸 (留出一点边距)
+                w = min(target_w, int(sw * 0.9))
+                h = min(target_h, int(sh * 0.9))
+                
+                # 居中计算
+                x = int((sw - w) / 2)
+                y = int((sh - h) / 2)
+                
+                self.root.geometry(f"{w}x{h}+{x}+{y}")
+
+            # 移除之前的最大尺寸限制，允许用户自由拖拽
+            self.root.maxsize(sw * 2, sh * 2)  # 设置一个足够大的上限即可
+            
+            # 字体适配
+            base_font = 12
             sw = self.root.winfo_screenwidth()
-            sh = self.root.winfo_screenheight()
-            w = int(sw * 0.6)
-            h = int(min(0.8 * sh, 820))
-            self.root.geometry(f"{w}x{h}")
-            base_font = 12 if sw >= 1800 else (11 if sw >= 1440 else 10)
+            if sw < 1440:
+                base_font = 10
             self.root.option_add("*Font", ("Arial", base_font))
         except Exception:
             pass
 
     def _on_window_resize(self, event):
-        """窗口尺寸变化事件：动态调整字体与日志区扩展以适配超宽屏"""
-        try:
-            sw = self.root.winfo_screenwidth()
-            w = max(400, int(event.width))
-            base_font = 12 if sw >= 1800 else (11 if sw >= 1440 else 10)
-            adj = base_font if w >= int(sw * 0.5) else (base_font - 1 if w >= int(sw * 0.4) else base_font - 2)
-            self.root.option_add("*Font", ("Arial", max(9, adj)))
-        except Exception:
-            pass
-
-    def _apply_responsive_layout(self):
-        """根据屏幕尺寸应用响应式布局（窗口宽度不超过屏幕宽度的60%）"""
-        sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
-        w = int(sw * 0.6)
-        h = int(min(0.8 * sh, 820))
-        try:
-            self.root.geometry(f"{w}x{h}")
-        except Exception:
-            pass
-        base_font = 12 if sw >= 1440 else (11 if sw >= 1280 else 10)
-        try:
-            self.root.option_add("*Font", ("Arial", base_font))
-        except Exception:
-            pass
+        """窗口尺寸变化事件：仅微调"""
+        pass
 
     def _create_new_log_file(self) -> str:
         """创建新的扫描日志文件（scan_YYYYMMDD_HHMMSS.log）"""
@@ -812,92 +923,54 @@ class SimpleWechatGUI:
         except Exception as e:
             messagebox.showerror("错误", f"复制失败: {e}")
 
-    def on_show_latest_exports(self):
-        """运行辅助脚本列出最新导出文件并在日志区展示
-
-        函数级注释：
-        - 调用 scripts/list_latest_exports.py（支持任意工作目录运行）；
-        - 默认展示前 10 条，并打印绝对路径；
-        - 将脚本输出追加到日志区，便于快速定位导出文件。
-        """
-        try:
-            python_bin = (self.var_python_bin.get().strip() or PYTHON_BIN)
-            cmd = [python_bin, os.path.join(PROJECT_ROOT, "scripts", "list_latest_exports.py"), "-n", "10"]
-            self._append_log("运行命令: " + self._quote_cmd(cmd))
-            completed = subprocess.run(cmd, capture_output=True, text=True)
-            if completed.returncode == 0:
-                out = completed.stdout.strip()
-                if out:
-                    for line in out.splitlines():
-                        self._append_log(line)
-                try:
-                    messagebox.showinfo("完成", "已在日志区显示最新导出文件列表")
-                except Exception:
-                    pass
-            else:
-                err = completed.stderr.strip() or completed.stdout.strip()
-                self._append_log(f"查询失败: {err}")
-                messagebox.showerror("错误", f"查询导出失败:\n{err}")
-        except Exception as e:
-            self._append_log(f"执行异常: {e}")
+    def _fetch_latest_exports(self, limit: int = 20) -> dict:
+        """本地获取最新导出文件列表（无需外部脚本或服务）"""
+        import datetime
+        from pathlib import Path
+        
+        root = Path(PROJECT_ROOT)
+        targets = [root / "output", root / "outputs"]
+        result = {"ok": True, "limit": int(limit), "data": {"output": [], "outputs": []}, "root": str(root)}
+        
+        for t in targets:
+            if not t.exists():
+                continue
+            
+            # Collect files
+            files = []
             try:
-                messagebox.showerror("错误", str(e))
+                for p in t.rglob("*"):
+                    if p.is_file() and not p.name.startswith("."):
+                        files.append(p)
             except Exception:
                 pass
-
-    def _fetch_latest_exports(self, limit: int = 20) -> dict:
-        """获取最新导出文件列表，优先调用本地配置服务接口，失败时回退到本地脚本。
-
-        函数级注释：
-        - 首选 GET http://localhost:8003/api/latest-exports?limit=<n>，返回结构形如：
-          {"ok": true, "limit": n, "data": {"output": [...], "outputs": [...]}, "root": "..."}
-        - 回退方案：直接复用 scripts/list_latest_exports.py 的工具函数（collect_files/describe_file），构建等价结构；
-        - 为保证 UI 稳定性，任何异常均返回空结构并记录日志。
-        """
-        import urllib.request
-        import urllib.error
-        import ssl
-        try:
-            ctx = ssl.create_default_context()
-            url = f"http://localhost:8003/api/latest-exports?limit={int(limit)}"
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
-                raw = resp.read().decode("utf-8")
-            data = json.loads(raw)
-            if isinstance(data, dict) and data.get("ok"):
-                return data
-        except urllib.error.URLError as e:
-            self._append_log(f"最新导出接口不可用，回退到本地脚本：{e}")
-        except Exception as e:
-            self._append_log(f"最新导出接口异常：{e}")
-
-        # 回退到本地脚本实现
-        try:
-            from scripts.list_latest_exports import get_project_root, collect_files, describe_file
-            root = get_project_root()
-            targets = [root / "output", root / "outputs"]
-            result = {"ok": True, "limit": int(limit), "data": {}, "root": str(root)}
-            for t in targets:
-                files = collect_files(t, int(limit))
-                items = []
-                for p in files:
-                    name, mtime_str = describe_file(p)
-                    try:
-                        mtime = p.stat().st_mtime
-                    except Exception:
-                        mtime = None
+                
+            # Sort by mtime desc
+            try:
+                files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            except Exception:
+                pass
+            files = files[:limit]
+            
+            items = []
+            for p in files:
+                try:
+                    stat = p.stat()
+                    mtime = stat.st_mtime
+                    dt = datetime.datetime.fromtimestamp(mtime)
+                    mtime_str = dt.strftime("%Y-%m-%d %H:%M:%S")
                     items.append({
-                        "name": name,
+                        "name": p.name,
                         "path": str(p.resolve()),
                         "dir": str(p.parent.resolve()),
                         "mtime": mtime,
-                        "mtime_str": mtime_str.replace("mtime: ", ""),
+                        "mtime_str": mtime_str,
                     })
-                result["data"][t.name] = items
-            return result
-        except Exception as e:
-            self._append_log(f"本地脚本回退失败：{e}")
-            return {"ok": False, "limit": int(limit), "data": {"output": [], "outputs": []}}
+                except Exception:
+                    pass
+            result["data"][t.name] = items
+            
+        return result
 
     def on_open_latest_exports_window(self):
         """打开“最新导出列表”小窗（Toplevel + Treeview），支持刷新、访达中显示与打开文件。
@@ -1257,31 +1330,16 @@ class SimpleWechatGUI:
         self._open_path_in_finder(path, action)
 
     def _open_path_in_finder(self, path: str, action: str = "reveal"):
-        """调用配置服务接口在 macOS Finder 中显示或打开目标路径。
-
-        函数级注释：
-        - POST http://localhost:8003/api/open-path，body: {path, action};
-        - 成功时提示并不阻塞；失败时弹窗显示原因（例如路径不安全或非 macOS）。
-        """
-        import urllib.request
-        import urllib.error
-        import ssl
+        """本地执行打开/显示文件（无需配置服务）"""
+        if not os.path.exists(path):
+            messagebox.showerror("错误", f"路径不存在: {path}")
+            return
         try:
-            ctx = ssl.create_default_context()
-            url = "http://localhost:8003/api/open-path"
-            payload = json.dumps({"path": path, "action": action}).encode("utf-8")
-            req = urllib.request.Request(url, method="POST", data=payload)
-            req.add_header("Content-Type", "application/json")
-            with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
-                raw = resp.read().decode("utf-8")
-            data = json.loads(raw)
-            if isinstance(data, dict) and data.get("ok"):
-                messagebox.showinfo("成功", data.get("message", "已在访达中处理"))
+            # macOS only 'open' command
+            if action == "reveal":
+                subprocess.run(["open", "-R", path], check=True)
             else:
-                message = (data.get("message") if isinstance(data, dict) else None) or "操作失败"
-                messagebox.showerror("错误", message)
-        except urllib.error.URLError as e:
-            messagebox.showerror("错误", f"无法连接配置服务: {e}")
+                subprocess.run(["open", path], check=True)
         except Exception as e:
             messagebox.showerror("错误", f"操作失败: {e}")
 
@@ -1307,8 +1365,15 @@ class SimpleWechatGUI:
             messagebox.showerror("错误", f"检测失败: {e}")
 
     def on_save_config(self):
-        """保存当前 UI 配置到项目根目录，同时生成 CLI 可直接读取的配置文件
+        """按钮点击事件：保存配置并弹窗提示"""
+        self._save_config_file(silent=False)
 
+    def _save_config_file(self, silent: bool = False):
+        """保存当前 UI 配置到项目根目录，同时生成 CLI 可直接读取的配置文件
+        
+        参数:
+          - silent: 是否静默保存（不弹窗提示），用于自动保存场景
+        
         函数级注释：
         - 保存 UI 配置到 ui_config.json（便于界面恢复，包括 python_bin）；
         - 生成 config.json（结构化 app/ocr/output），供 CLI 的 ConfigManager 自动读取；
@@ -1332,6 +1397,7 @@ class SimpleWechatGUI:
             "max_scrolls": self.var_max_scrolls.get(),
             "max_spm": self.var_max_spm.get(),
             "formats": {name: var.get() for name, var in self.format_vars.items()},
+            "geometry": self.root.geometry(),  # 保存当前窗口尺寸和位置
         }
         ui_save_ok = False
         try:
@@ -1339,7 +1405,8 @@ class SimpleWechatGUI:
                 json.dump(ui_data, f, ensure_ascii=False, indent=2)
             ui_save_ok = True
         except Exception as e:
-            messagebox.showerror("错误", f"保存 UI 配置失败: {e}")
+            if not silent:
+                messagebox.showerror("错误", f"保存 UI 配置失败: {e}")
 
         # 2) 生成 CLI 使用的 config.json
         cfg_path = os.path.join(PROJECT_ROOT, "config.json")
@@ -1373,12 +1440,15 @@ class SimpleWechatGUI:
             }
             with open(cfg_path, "w", encoding="utf-8") as f:
                 json.dump(config_data, f, ensure_ascii=False, indent=2)
-            if ui_save_ok:
-                messagebox.showinfo("已保存", f"配置已保存：\n- UI: {ui_cfg_path}\n- CLI: {cfg_path}")
-            else:
-                messagebox.showinfo("已保存", f"CLI 配置已保存到: {cfg_path}")
+            
+            if not silent:
+                if ui_save_ok:
+                    messagebox.showinfo("已保存", f"配置已保存：\n- UI: {ui_cfg_path}\n- CLI: {cfg_path}")
+                else:
+                    messagebox.showinfo("已保存", f"CLI 配置已保存到: {cfg_path}")
         except Exception as e:
-            messagebox.showerror("错误", f"保存 CLI 配置失败: {e}")
+            if not silent:
+                messagebox.showerror("错误", f"保存 CLI 配置失败: {e}")
 
     def on_load_config(self):
         """从项目根目录 ui_config.json 加载配置并回填到 UI
@@ -1416,60 +1486,24 @@ class SimpleWechatGUI:
         except Exception as e:
             messagebox.showerror("错误", f"加载失败: {e}")
 
-    def on_load_from_server(self):
-        """从本地配置服务加载 UI 配置并回填到界面
-
-        函数级注释：
-        - 调用 GET http://localhost:8003/api/load-config 获取 ui_config.json 的内容；
-        - 若服务未启动或响应异常，给出友好提示；
-        - 字段映射同 on_load_config，确保行为一致。
-        """
-        import urllib.request
-        import urllib.error
-        import ssl
-
-        url = "http://localhost:8003/api/load-config"
+    def _on_close_window(self):
+        """窗口关闭事件：自动保存当前状态并退出"""
         try:
-            # 兼容可能的自签名，本地仅用于开发
-            ctx = ssl.create_default_context()
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
-                raw = resp.read().decode("utf-8")
-            data = json.loads(raw)
-            if not data or not data.get("ok"):
-                message = data.get("message", "服务返回失败") if isinstance(data, dict) else "服务返回失败"
-                messagebox.showerror("错误", message)
-                return
-            payload = data.get("data") or {}
-            # 与 on_load_config 同步字段回填逻辑
-            self.var_python_bin.set(payload.get("python_bin", self.var_python_bin.get()))
-            self.var_window_title.set(payload.get("window_title", ""))
-            self.var_chat_area.set(payload.get("chat_area", ""))
-            self.var_direction.set(payload.get("direction", "up"))
-            self.var_full_fetch.set(bool(payload.get("full_fetch", False)))
-            self.var_go_top_first.set(bool(payload.get("go_top_first", False)))
-            self.var_skip_empty.set(bool(payload.get("skip_empty", True)))
-            self.var_verbose.set(bool(payload.get("verbose", True)))
-            self.var_ocr_lang.set(payload.get("ocr_lang", "ch"))
-            self.var_output_dir.set(payload.get("output_dir", os.path.join(PROJECT_ROOT, "output")))
-            self.var_filename_prefix.set(payload.get("filename_prefix", "auto_wechat_scan"))
-            self.var_scroll_delay.set(str(payload.get("scroll_delay", "")))
-            self.var_max_scrolls.set(str(payload.get("max_scrolls", "60")))
-            self.var_max_spm.set(str(payload.get("max_spm", "40")))
-            formats_data = payload.get("formats", {})
-            for name, var in self.format_vars.items():
-                var.set(bool(formats_data.get(name, var.get())))
-            messagebox.showinfo("已加载", "已从配置服务回填界面")
-        except urllib.error.URLError as e:
-            messagebox.showerror("错误", f"无法连接配置服务: {e}")
-        except Exception as e:
-            messagebox.showerror("错误", f"加载失败: {e}")
-
+            # 自动保存配置（静默）
+            self._save_config_file(silent=True)
+        except Exception:
+            pass
+        finally:
+            # 停止可能正在运行的扫描
+            self.on_stop_scan()
+            self.root.destroy()
 
 def main():
     """程序入口：构建并启动 Tkinter 主循环"""
     root = tk.Tk()
     app = SimpleWechatGUI(root)
+    # 绑定窗口关闭协议，实现自动保存状态
+    root.protocol("WM_DELETE_WINDOW", app._on_close_window)
     root.mainloop()
 
 

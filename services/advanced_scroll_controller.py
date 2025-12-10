@@ -48,6 +48,14 @@ class AdvancedScrollController(AutoScrollController):
         # 初始化图像预处理器
         self.pre = ImagePreprocessor()
         
+        # 初始化 OCR 和解析器（延迟加载，避免多实例开销）
+        # 函数级注释：
+        # - OCRProcessor 初始化开销极大（加载模型），必须在类级别单例维护；
+        # - 之前在 _capture_scroll_state 中重复初始化导致每次滚动耗时激增（15s+）；
+        # - 现改为成员变量，并在 progressive_scroll 启动时按需初始化。
+        self.ocr = None
+        self.parser = None
+        
         # 滚动状态跟踪
         self.scroll_history: List[Dict[str, Any]] = []
         self.current_position: Optional[Tuple[int, int]] = None
@@ -82,6 +90,23 @@ class AdvancedScrollController(AutoScrollController):
         # 如启用看门狗则启动后台心跳线程
         self.start_watchdog()
         
+        # 确保 OCR 引擎就绪
+        try:
+            from services.ocr_processor import OCRProcessor
+            from services.message_parser import MessageParser
+            
+            if self.ocr is None:
+                self.ocr = OCRProcessor()
+            if not self.ocr.is_engine_ready():
+                self.logger.info("正在初始化 OCR 引擎...")
+                self.ocr.initialize_engine()
+                
+            if self.parser is None:
+                self.parser = MessageParser()
+        except Exception as e:
+            self.logger.error(f"OCR引擎初始化失败: {e}")
+            return results
+
         # 定位初始位置
         if not self._locate_initial_position():
             self.logger.error("无法定位初始滚动位置")
@@ -213,23 +238,27 @@ class AdvancedScrollController(AutoScrollController):
         # 提取当前可视内容
         if state["screenshot"]:
             try:
-                # 使用OCR提取当前内容
-                from services.ocr_processor import OCRProcessor
-                from services.message_parser import MessageParser
+                # 使用预初始化的 OCR 实例
+                # 函数级注释：
+                # - 复用 self.ocr 避免重复加载模型（节省 2-5s/次）；
+                # - 若 OCR 未就绪（异常情况），尝试临时初始化作为兜底。
+                if self.ocr is None or not self.ocr.is_engine_ready():
+                     from services.ocr_processor import OCRProcessor
+                     if self.ocr is None:
+                         self.ocr = OCRProcessor()
+                     self.ocr.initialize_engine()
                 
-                ocr = OCRProcessor()
-                parser = MessageParser()
-                
-                if not ocr.is_engine_ready():
-                    ocr.initialize_engine()
+                if self.parser is None:
+                    from services.message_parser import MessageParser
+                    self.parser = MessageParser()
                 
                 # 预处理图像
                 optimized = self.optimize_screenshot_quality(state["screenshot"])
                 preprocessed = self.pre.preprocess_for_ocr(optimized)
                 
                 # 提取文本区域
-                text_regions = ocr.extract_text_regions(preprocessed)
-                messages = parser.parse(text_regions)
+                text_regions = self.ocr.extract_text_regions(preprocessed)
+                messages = self.parser.parse(text_regions)
                 
                 state["messages"] = messages
                 state["message_count"] = len(messages)

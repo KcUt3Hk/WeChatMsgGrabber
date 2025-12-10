@@ -47,6 +47,8 @@ class Message:
     timestamp: datetime
     confidence_score: float
     raw_ocr_text: str
+    # 消息发生时间（从界面时间戳推断），格式建议 ISO 8601
+    message_time: Optional[datetime] = None
     # 结构化扩展：分享卡片与引用元信息（可选）
     # - share_card: 若消息为“分享”类型（小红书/哔哩哔哩等），提供结构化字段以便统一渲染与导出；
     # - quote_meta: 若消息包含“引用气泡”，保留原始昵称与身份标签，并提取纯文本内容以供 UI 渲染。

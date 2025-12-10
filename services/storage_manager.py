@@ -59,6 +59,10 @@ class StorageManager:
             "confidence_score": float(msg.confidence_score),
             "raw_ocr_text": msg.raw_ocr_text,
         }
+        # 消息发生时间（若存在）
+        if msg.message_time:
+            base["message_time"] = msg.message_time.isoformat()
+
         # 扩展结构：分享卡片与引用气泡元信息
         try:
             if getattr(msg, "share_card", None) is not None:
@@ -169,7 +173,7 @@ class StorageManager:
         if fmt == "csv":
             path = self._generate_filename(filename_prefix, "csv")
             # 动态移除被排除的字段
-            default_fields = ["id", "sender", "content", "message_type", "timestamp", "confidence_score", "raw_ocr_text"]
+            default_fields = ["id", "sender", "content", "message_type", "timestamp", "message_time", "confidence_score", "raw_ocr_text"]
             try:
                 exclude = set((self.config and getattr(self.config, 'exclude_fields', []) ) or [])
             except Exception:
@@ -346,7 +350,12 @@ class StorageManager:
             display_content = "图片未识别出文字"
         else:
             display_content = m.content
-        header = f"- [{m.timestamp.isoformat()}] **{m.sender}** ({m.message_type.value}): {display_content}"
+        
+        time_str = m.timestamp.isoformat()
+        if m.message_time:
+            time_str = f"{m.message_time.isoformat()} (Capture: {time_str})"
+            
+        header = f"- [{time_str}] **{m.sender}** ({m.message_type.value}): {display_content}"
         lines = [header]
 
         # 引用气泡（优先在主行之前给出上下文）
@@ -403,7 +412,12 @@ class StorageManager:
             display_content = "图片未识别出文字"
         else:
             display_content = m.content
-        header = f"[{m.timestamp.isoformat()}] {m.sender} ({m.message_type.value}): {display_content}"
+        
+        time_str = m.timestamp.isoformat()
+        if m.message_time:
+            time_str = f"{m.message_time.isoformat()}"
+            
+        header = f"[{time_str}] {m.sender} ({m.message_type.value}): {display_content}"
         lines = [header]
 
         # 引用气泡
