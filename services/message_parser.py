@@ -40,6 +40,68 @@ class MessageParser:
     def __init__(self, options: Optional[ParseOptions] = None):
         self.options = options or ParseOptions()
 
+    @staticmethod
+    def parse_wechat_time(text: str, reference_date: datetime) -> datetime:
+        """Parse WeChat time string to datetime.
+        
+        Args:
+            text: Time string (e.g. "10:00", "Yesterday 10:00", "Monday 10:00")
+            reference_date: Reference date (usually scan date)
+            
+        Returns:
+            datetime: Parsed datetime
+        """
+        import re
+        from datetime import timedelta
+        
+        text = text.strip()
+        
+        # Full date: 2025年12月06日 10:00
+        match = re.match(r'(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2})[:：](\d{1,2})', text)
+        if match:
+            try:
+                return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)), 
+                               int(match.group(4)), int(match.group(5)))
+            except ValueError:
+                pass
+
+        # Current year date: 12月06日 10:00
+        match = re.match(r'(\d{1,2})月(\d{1,2})日\s*(\d{1,2})[:：](\d{1,2})', text)
+        if match:
+            try:
+                return datetime(reference_date.year, int(match.group(1)), int(match.group(2)), 
+                               int(match.group(3)), int(match.group(4)))
+            except ValueError:
+                pass
+
+        # Yesterday: 昨天 10:00
+        match = re.match(r'昨天\s*(\d{1,2})[:：](\d{1,2})', text)
+        if match:
+            d = reference_date - timedelta(days=1)
+            return d.replace(hour=int(match.group(1)), minute=int(match.group(2)), second=0, microsecond=0)
+
+        # Weekday: 星期一 10:00
+        weekdays = {'一': 0, '二': 1, '三': 2, '四': 3, '五': 4, '六': 5, '日': 6, '天': 6}
+        match = re.match(r'星期([一二三四五六日天])\s*(\d{1,2})[:：](\d{1,2})', text)
+        if match:
+            target_wd = weekdays[match.group(1)]
+            current_wd = reference_date.weekday()
+            days_diff = (current_wd - target_wd) % 7
+            if days_diff == 0:
+                 days_diff = 7
+            d = reference_date - timedelta(days=days_diff)
+            return d.replace(hour=int(match.group(2)), minute=int(match.group(3)), second=0, microsecond=0)
+
+        # Today: 10:00
+        match = re.match(r'^(\d{1,2})[:：](\d{1,2})$', text)
+        if match:
+            try:
+                return reference_date.replace(hour=int(match.group(1)), minute=int(match.group(2)), second=0, microsecond=0)
+            except ValueError:
+                pass
+
+        return reference_date
+
     def parse(self, regions: List[TextRegion]) -> List[Message]:
         """Parse text regions into messages.
 
