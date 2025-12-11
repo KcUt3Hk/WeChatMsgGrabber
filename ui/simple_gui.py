@@ -70,6 +70,20 @@ class SimpleWechatGUI:
         self.var_no_dedup = tk.BooleanVar(value=False)
         self.var_clear_dedup = tk.BooleanVar(value=False)
         self.var_ocr_lang = tk.StringVar(value="ch")
+        
+        # 语言映射：显示名称 -> PaddleOCR代码
+        self.lang_code_map = {
+            "中文 (zh-CN)": "ch",
+            "英语 (en)": "en",
+            "日语 (ja)": "japan",
+            "韩语 (ko)": "korean",
+            "法语 (fr)": "french",
+            "德语 (de)": "german"
+        }
+        self.lang_display_map = {v: k for k, v in self.lang_code_map.items()}
+        # 默认显示
+        self.var_ocr_lang_display = tk.StringVar(value=self.lang_display_map.get("ch", "中文 (zh-CN)"))
+
         self.var_output_dir = tk.StringVar(value=os.path.join(PROJECT_ROOT, "output"))
         self.var_filename_prefix = tk.StringVar(value="auto_wechat_scan")
         self.var_scroll_delay = tk.StringVar(value="")
@@ -100,7 +114,8 @@ class SimpleWechatGUI:
     def _build_layout(self):
         """构建界面布局与控件（v2.1 垂直流式布局，适合窄窗口）"""
         # 使用 Canvas + Scrollbar 实现可滚动的主容器，避免内容过多被截断
-        main_canvas = tk.Canvas(self.root)
+        # highlightthickness=0 移除 Canvas 默认的黑色边框/焦点框
+        main_canvas = tk.Canvas(self.root, highlightthickness=0)
         scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=main_canvas.yview)
         scrollable_frame = ttk.Frame(main_canvas)
 
@@ -210,7 +225,9 @@ class SimpleWechatGUI:
         ttk.Label(s_r1, text="方向:").pack(side="left")
         ttk.Combobox(s_r1, textvariable=self.var_direction, values=["up", "down"], width=6, state="readonly").pack(side="left", padx=(4, 12))
         ttk.Label(s_r1, text="OCR语言:").pack(side="left")
-        ttk.Entry(s_r1, textvariable=self.var_ocr_lang, width=5).pack(side="left", padx=4)
+        self.combo_lang = ttk.Combobox(s_r1, textvariable=self.var_ocr_lang_display, values=list(self.lang_code_map.keys()), width=14, state="readonly")
+        self.combo_lang.pack(side="left", padx=4)
+        self.combo_lang.bind("<<ComboboxSelected>>", self._on_lang_changed)
         
         # Row 2: 滚动次数 & 速率
         s_r2 = ttk.Frame(group_scroll)
@@ -226,6 +243,12 @@ class SimpleWechatGUI:
         ttk.Label(s_r3, text="SPM范围(min,max):").pack(side="left")
         ttk.Entry(s_r3, textvariable=self.var_spm_range, width=10).pack(side="left", padx=4)
         
+        # Row 3: 模式开关
+        s_r3 = ttk.Frame(group_scroll)
+        s_r3.pack(fill="x", pady=4)
+        ttk.Checkbutton(s_r3, text="全量模式 (Full Fetch)", variable=self.var_full_fetch).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(s_r3, text="从顶部开始 (Go Top)", variable=self.var_go_top_first).pack(side="left")
+
         # === 4. 输出设置 ===
         group_out = ttk.LabelFrame(scrollable_frame, text="4. 输出设置", padding=PAD_X)
         group_out.pack(fill="x", padx=PAD_X, pady=PAD_Y)
@@ -250,23 +273,7 @@ class SimpleWechatGUI:
         ttk.Label(pre_row, text="前缀:").pack(side="left")
         ttk.Entry(pre_row, textvariable=self.var_filename_prefix, width=20).pack(side="left", padx=4, fill="x", expand=True)
 
-        # === 5. 选项开关 ===
-        group_opt = ttk.LabelFrame(scrollable_frame, text="5. 选项开关", padding=PAD_X)
-        group_opt.pack(fill="x", padx=PAD_X, pady=PAD_Y)
-        
-        opt_r1 = ttk.Frame(group_opt)
-        opt_r1.pack(fill="x", anchor="w", pady=2)
-        ttk.Checkbutton(opt_r1, text="full-fetch", variable=self.var_full_fetch).pack(side="left", padx=8)
-        ttk.Checkbutton(opt_r1, text="go-top", variable=self.var_go_top_first).pack(side="left", padx=8)
-        ttk.Checkbutton(opt_r1, text="skip-empty", variable=self.var_skip_empty).pack(side="left", padx=8)
-        
-        opt_r2 = ttk.Frame(group_opt)
-        opt_r2.pack(fill="x", anchor="w", pady=2)
-        ttk.Checkbutton(opt_r2, text="verbose", variable=self.var_verbose).pack(side="left", padx=8)
-        ttk.Checkbutton(opt_r2, text="禁用去重", variable=self.var_no_dedup).pack(side="left", padx=8)
-        ttk.Checkbutton(opt_r2, text="清空去重索引", variable=self.var_clear_dedup).pack(side="left", padx=8)
-
-        # === 6. 操作区 ===
+        # === 5. 操作区 ===
         group_act = ttk.Frame(scrollable_frame, padding=PAD_X)
         group_act.pack(fill="x", padx=PAD_X, pady=PAD_Y)
         
@@ -288,7 +295,7 @@ class SimpleWechatGUI:
         ttk.Button(act_row3, text="加载配置", command=self.on_load_config).pack(side="left", fill="x", expand=True, padx=4)
         ttk.Button(act_row3, text="最新列表", command=self.on_open_latest_exports_window).pack(side="left", fill="x", expand=True, padx=4)
         
-        # === 7. 日志与预览 ===
+        # === 6. 日志与预览 ===
         # 预览图
         self.preview_label = ttk.Label(scrollable_frame, text="[预览图区域]")
         self.preview_label.pack(pady=4)
@@ -300,6 +307,13 @@ class SimpleWechatGUI:
         
         # 底部留白
         ttk.Label(scrollable_frame, text="").pack()
+
+    def _on_lang_changed(self, event=None):
+        """Combobox 选中事件：更新 var_ocr_lang 并记录日志"""
+        display = self.var_ocr_lang_display.get()
+        code = self.lang_code_map.get(display, "ch")
+        self.var_ocr_lang.set(code)
+        self._append_log(f"OCR 语言已切换为: {display} (Code: {code})")
 
     def _get_formats(self) -> str:
         """收集导出格式复选框，拼接为逗号分隔字符串"""
@@ -1474,6 +1488,11 @@ class SimpleWechatGUI:
             self.var_skip_empty.set(bool(data.get("skip_empty", True)))
             self.var_verbose.set(bool(data.get("verbose", True)))
             self.var_ocr_lang.set(data.get("ocr_lang", "ch"))
+            # 同步显示变量
+            code = self.var_ocr_lang.get()
+            display = self.lang_display_map.get(code, "中文 (zh-CN)")
+            self.var_ocr_lang_display.set(display)
+            
             self.var_output_dir.set(data.get("output_dir", os.path.join(PROJECT_ROOT, "output")))
             self.var_filename_prefix.set(data.get("filename_prefix", "auto_wechat_scan"))
             self.var_scroll_delay.set(str(data.get("scroll_delay", "")))

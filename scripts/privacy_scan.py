@@ -66,6 +66,9 @@ def should_skip_dir(dir_name: str) -> bool:
         # 以下目录为运行产物或性能分析输出，可能包含本工具生成的报告或本机路径，不参与扫描
         "reports",   # 隐私扫描报告输出目录，避免自扫误报
         "profiles",  # 本地性能分析报告目录，已在 .gitignore 中忽略
+        "output",
+        "outputs",
+        "tmp",
     }
     return dir_name in skip_dirs
 
@@ -101,7 +104,11 @@ def list_files_to_scan(base_dir: str) -> List[str]:
     - 只收集后缀在 text_file_extensions() 集合中的文件。
     """
     files: List[str] = []
-    exclude_files = {os.path.normpath(os.path.join(base_dir, "scripts", "privacy_scan.py"))}
+    exclude_files = {
+        os.path.normpath(os.path.join(base_dir, "scripts", "privacy_scan.py")),
+        os.path.normpath(os.path.join(base_dir, "config.json")),
+        os.path.normpath(os.path.join(base_dir, "ui_config.json")),
+    }
     for root, dirs, filenames in os.walk(base_dir):
         # 过滤目录
         dirs[:] = [d for d in dirs if not should_skip_dir(d)]
@@ -127,6 +134,7 @@ def build_sensitive_patterns() -> Tuple[List[str], List[Tuple[str, re.Pattern]],
     # 错误级别：精确字符串
     exact_errors: List[str] = [
         # 在此处添加特定的高危字符串（如硬编码的 API Key、特定路径等）
+        "lbank", "lbk", "陈妮", "pank", "amanda"
     ]
 
     # 错误级别：正则表达式
