@@ -14,6 +14,7 @@ import sys
 sys.modules['paddleocr'] = Mock()
 
 from services.ocr_processor import OCRProcessor
+from services.image_preprocessor import ImagePreprocessor
 from models.config import OCRConfig
 from models.data_models import OCRResult, TextRegion, Rectangle
 
@@ -421,3 +422,71 @@ class TestOCRProcessorIntegration:
         # Test configuration
         assert processor.config.language == "chi_sim"
         assert processor.config.confidence_threshold == 0.5
+
+
+def test_detect_text_regions_accepts_grayscale_input():
+    pre = ImagePreprocessor()
+    img = Image.new('RGB', (240, 120), color='white')
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((30, 30, 210, 90), fill='black')
+    gray = pre.preprocess_for_ocr(img)
+    rects = pre.detect_text_regions(gray)
+    assert isinstance(rects, list)
+
+
+def test_detect_and_process_regions_adds_media_placeholder(monkeypatch):
+    config = OCRConfig(language="chi_sim", confidence_threshold=0.5)
+    processor = OCRProcessor(config)
+    processor.ocr_engine = object()
+
+    rect = Rectangle(x=10, y=10, width=240, height=180)
+
+    def fake_detect_text_regions(image):
+        return [rect]
+
+    def fake_crop_text_region(image, region):
+        crop = Image.new('L', (region.width, region.height), color=255)
+        d = ImageDraw.Draw(crop)
+        d.rectangle((20, 20, region.width - 20, region.height - 20), fill=0)
+        return crop
+
+    def fake_process_image(img, preprocess=True, preprocess_options=None, is_cropped_region=False):
+        return OCRResult(text="", confidence=0.1, bounding_boxes=[], processing_time=0.01)
+
+    monkeypatch.setattr(processor.preprocessor, "detect_text_regions", fake_detect_text_regions)
+    monkeypatch.setattr(processor.preprocessor, "crop_text_region", fake_crop_text_region)
+    monkeypatch.setattr(processor.preprocessor, "refine_crop", lambda img, padding=15: Rectangle(x=0, y=0, width=img.width, height=img.height))
+    monkeypatch.setattr(processor, "process_image", fake_process_image)
+
+    base = Image.new('RGB', (600, 800), color='white')
+    results = processor.detect_and_process_regions(base, max_regions=10)
+    assert any(tr.type in ("image", "sticker") for tr, _ in results)
+
+
+def test_detect_and_process_regions_adds_media_placeholder_for_small_square(monkeypatch):
+    config = OCRConfig(language="chi_sim", confidence_threshold=0.5)
+    processor = OCRProcessor(config)
+    processor.ocr_engine = object()
+
+    rect = Rectangle(x=10, y=10, width=60, height=60)
+
+    def fake_detect_text_regions(image):
+        return [rect]
+
+    def fake_crop_text_region(image, region):
+        crop = Image.new('L', (region.width, region.height), color=255)
+        d = ImageDraw.Draw(crop)
+        d.ellipse((10, 10, region.width - 10, region.height - 10), fill=0)
+        return crop
+
+    def fake_process_image(img, preprocess=True, preprocess_options=None, is_cropped_region=False):
+        return OCRResult(text="", confidence=0.1, bounding_boxes=[], processing_time=0.01)
+
+    monkeypatch.setattr(processor.preprocessor, "detect_text_regions", fake_detect_text_regions)
+    monkeypatch.setattr(processor.preprocessor, "crop_text_region", fake_crop_text_region)
+    monkeypatch.setattr(processor.preprocessor, "refine_crop", lambda img, padding=15: Rectangle(x=0, y=0, width=img.width, height=img.height))
+    monkeypatch.setattr(processor, "process_image", fake_process_image)
+
+    base = Image.new('RGB', (600, 800), color='white')
+    results = processor.detect_and_process_regions(base, max_regions=10)
+    assert any(tr.type in ("image", "sticker") for tr, _ in results)

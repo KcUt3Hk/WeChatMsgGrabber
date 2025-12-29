@@ -21,16 +21,24 @@ import os
 import sys
 import threading
 import subprocess
+import signal
 import json
 import shlex
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from typing import List
+from typing import List, Optional, Tuple
 
 from PIL import Image, ImageTk, ImageGrab
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 添加项目根目录到 sys.path 以便导入模块
+sys.path.append(PROJECT_ROOT)
+
+from services.image_preprocessor import ImagePreprocessor
+from models.data_models import Rectangle
+
 # 默认 Python 解释器：优先使用当前进程的解释器，其次回退到通用命令名
 # 说明：避免硬编码个人路径以提升跨平台可移植性
 PYTHON_BIN = sys.executable or "python3"
@@ -48,6 +56,7 @@ class SimpleWechatGUI:
     def __init__(self, root: tk.Tk):
         """初始化 GUI 组件与默认值"""
         self.root = root
+        self.preprocessor = ImagePreprocessor()
         self.root.title("WeChat OCR 简易前端 (v3.0)")
         self.preview_image = None
         self.paused = False
@@ -451,7 +460,12 @@ class SimpleWechatGUI:
         return outdir
 
     def _update_preview_from_chat_area(self):
-        """根据当前聊天区域坐标抓取一次预览图并显示在左侧预览区"""
+        """根据当前聊天区域坐标抓取一次预览图并显示在左侧预览区
+
+        函数级注释：
+        - 预览截取优先使用 pyautogui（与扫描流程的 region 坐标一致）；
+        - 当 pyautogui 不可用或失败时回退到 ImageGrab。
+        """
         rect = self.var_chat_area.get().strip()
         if not rect:
             return
@@ -462,8 +476,7 @@ class SimpleWechatGUI:
             x, y, w, h = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
             if w <= 0 or h <= 0:
                 return
-            bbox = (x, y, x + w, y + h)
-            img = ImageGrab.grab(bbox=bbox)
+            img = self._capture_region_for_preview(x, y, w, h)
             # 限制最大宽度为 350，高度自适应，防止撑破窄窗口布局
             img.thumbnail((350, 350))
             self.preview_image = ImageTk.PhotoImage(img)
@@ -471,6 +484,277 @@ class SimpleWechatGUI:
             self.preview_label.image = self.preview_image
         except Exception:
             pass
+
+    def _get_logical_screen_size(self) -> Tuple[int, int]:
+        """获取逻辑屏幕尺寸（pt）
+
+        函数级注释：
+        - 优先使用 pyautogui.size()（与 pyautogui.screenshot(region=...) 坐标体系一致）；
+        - 回退到 Tk 的 winfo_screenwidth/height。
+        """
+        try:
+            import pyautogui
+
+            size = pyautogui.size()
+            return int(size.width), int(size.height)
+        except Exception:
+            return int(self.root.winfo_screenwidth()), int(self.root.winfo_screenheight())
+
+    def _get_capture_scale_factors(self) -> Tuple[float, float]:
+        """探测截图输出与逻辑坐标之间的缩放因子（Retina/缩放自适应）
+
+        函数级注释：
+        - 通过请求固定逻辑区域 (0,0,120,120) 并观察截图返回尺寸，推导 scale；
+        - 该 scale 用于将“逻辑坐标(pt)”映射到截图的“物理像素(px)”。
+        """
+        try:
+            import pyautogui
+
+            base = 120
+            img = pyautogui.screenshot(region=(0, 0, base, base))
+            sx = float(getattr(img, "width", img.size[0])) / float(base)
+            sy = float(getattr(img, "height", img.size[1])) / float(base)
+            if sx <= 0 or sy <= 0:
+                return 1.0, 1.0
+            return sx, sy
+        except Exception:
+            try:
+                logical_sw, logical_sh = self._get_logical_screen_size()
+                shot = ImageGrab.grab()
+                if logical_sw <= 0 or logical_sh <= 0:
+                    return 1.0, 1.0
+                return float(shot.width) / float(logical_sw), float(shot.height) / float(logical_sh)
+            except Exception:
+                return 1.0, 1.0
+
+    def _capture_region_for_preview(self, x: int, y: int, w: int, h: int) -> Image.Image:
+        """用于 UI 预览的区域截图
+
+        函数级注释：
+        - 预览优先走 pyautogui.screenshot(region=(x,y,w,h))，确保与扫描过程一致；
+        - 若 pyautogui 不可用，回退到 ImageGrab.grab(bbox=...)；
+        - 当检测到 retina scale 时，ImageGrab 回退路径会按 scale 放大 bbox。
+        """
+        try:
+            import pyautogui
+
+            return pyautogui.screenshot(region=(int(x), int(y), int(w), int(h)))
+        except Exception:
+            sx, sy = self._get_capture_scale_factors()
+            bbox = (
+                int(round(x * sx)),
+                int(round(y * sy)),
+                int(round((x + w) * sx)),
+                int(round((y + h) * sy)),
+            )
+            return ImageGrab.grab(bbox=bbox)
+
+    def _smart_detect_chat_area(self, screenshot: Image.Image) -> Optional[Tuple[int, int, int, int]]:
+        """基于屏幕截图自动识别微信聊天区域并生成合适坐标
+
+        函数级注释：
+        - 使用 ImagePreprocessor.detect_chat_area_smart 识别结构分割线（侧边栏/顶部/输入框）；
+        - 在高分辨率截图上先下采样以提升速度，再按比例映射回原图；
+        - 最终输出为“逻辑坐标(pt)”的 x,y,w,h，供扫描与预览使用。
+        """
+        try:
+            win_rect = self._smart_detect_chat_area_from_wechat_window()
+            if win_rect:
+                return win_rect
+
+            sw, sh = int(screenshot.width), int(screenshot.height)
+            if sw <= 0 or sh <= 0:
+                return None
+
+            max_side = 1600
+            scale_down = 1.0
+            shot_for_detect = screenshot
+            if max(sw, sh) > max_side:
+                scale_down = float(max(sw, sh)) / float(max_side)
+                nw = max(1, int(round(sw / scale_down)))
+                nh = max(1, int(round(sh / scale_down)))
+                shot_for_detect = screenshot.resize((nw, nh), Image.BILINEAR)
+
+            roi_small = self.preprocessor.detect_chat_area_smart(shot_for_detect)
+            roi_px = Rectangle(
+                x=int(round(roi_small.x * scale_down)),
+                y=int(round(roi_small.y * scale_down)),
+                width=int(round(roi_small.width * scale_down)),
+                height=int(round(roi_small.height * scale_down)),
+            )
+
+            roi_px = self._refine_chat_roi_excluding_headers(screenshot, roi_px)
+
+            if roi_px.width <= 0 or roi_px.height <= 0:
+                return None
+
+            if roi_px.width >= int(0.95 * sw) and roi_px.height >= int(0.95 * sh):
+                return None
+
+            sx, sy = self._get_capture_scale_factors()
+            if sx <= 0 or sy <= 0:
+                sx, sy = 1.0, 1.0
+
+            x = int(round(roi_px.x / sx))
+            y = int(round(roi_px.y / sy))
+            w = int(round(roi_px.width / sx))
+            h = int(round(roi_px.height / sy))
+
+            logical_sw, logical_sh = self._get_logical_screen_size()
+            x = max(0, min(x, max(0, logical_sw - 1)))
+            y = max(0, min(y, max(0, logical_sh - 1)))
+            w = max(1, min(w, max(1, logical_sw - x)))
+            h = max(1, min(h, max(1, logical_sh - y)))
+
+            if w < 200 or h < 200:
+                return None
+
+            return x, y, w, h
+        except Exception:
+            return None
+
+    def _normalize_rect_to_logical(self, rect: Rectangle) -> Rectangle:
+        """将输入矩形规范化为逻辑坐标(pt)
+
+        函数级注释：
+        - 部分 macOS API（如 Quartz）返回的窗口坐标在某些环境下可能是物理像素(px)；
+        - 通过与逻辑屏幕尺寸对比判断是否疑似为 px，并按 scale 因子回算为 pt。
+        """
+        logical_sw, logical_sh = self._get_logical_screen_size()
+        sx, sy = self._get_capture_scale_factors()
+        if sx <= 0 or sy <= 0:
+            sx, sy = 1.0, 1.0
+
+        is_likely_physical = False
+        try:
+            if rect.x + rect.width > int(logical_sw * 1.2) or rect.y + rect.height > int(logical_sh * 1.2):
+                is_likely_physical = True
+            if rect.width > int(logical_sw * 1.2) or rect.height > int(logical_sh * 1.2):
+                is_likely_physical = True
+        except Exception:
+            is_likely_physical = False
+
+        if not is_likely_physical:
+            return rect
+
+        return Rectangle(
+            x=int(round(rect.x / sx)),
+            y=int(round(rect.y / sy)),
+            width=int(round(rect.width / sx)),
+            height=int(round(rect.height / sy)),
+        )
+
+    def _smart_detect_chat_area_from_wechat_window(self) -> Optional[Tuple[int, int, int, int]]:
+        """优先基于微信窗口定位来推导聊天区域坐标
+
+        函数级注释：
+        - 在多显示器/外接屏场景下，全屏截图+结构线检测容易被其他窗口干扰；
+        - 先用 AutoScrollController.locate_wechat_window 定位窗口，再在窗口截图内做 ROI 检测；
+        - 输出统一为逻辑坐标(pt)的 x,y,w,h。
+        """
+        try:
+            from services.auto_scroll_controller import AutoScrollController
+
+            ctrl = AutoScrollController(enable_macos_fallback=True)
+            title_override = (self.var_window_title.get().strip() if hasattr(self, "var_window_title") else "")
+            if title_override:
+                try:
+                    ctrl.set_title_override(title_override)
+                except Exception:
+                    pass
+
+            win = ctrl.locate_wechat_window()
+            if not win or not getattr(win, "position", None):
+                return None
+
+            win_rect = self._normalize_rect_to_logical(win.position)
+            if win_rect.width < 300 or win_rect.height < 300:
+                return None
+
+            try:
+                img_win = self._capture_region_for_preview(win_rect.x, win_rect.y, win_rect.width, win_rect.height)
+            except Exception:
+                return None
+
+            sx, sy = self._get_capture_scale_factors()
+            if sx <= 0 or sy <= 0:
+                sx, sy = 1.0, 1.0
+
+            max_side = 1400
+            scale_down = 1.0
+            img_for_detect = img_win
+            if max(img_win.width, img_win.height) > max_side:
+                scale_down = float(max(img_win.width, img_win.height)) / float(max_side)
+                nw = max(1, int(round(img_win.width / scale_down)))
+                nh = max(1, int(round(img_win.height / scale_down)))
+                img_for_detect = img_win.resize((nw, nh), Image.BILINEAR)
+
+            roi_small = self.preprocessor.detect_chat_area_smart(img_for_detect)
+            roi_px = Rectangle(
+                x=int(round(roi_small.x * scale_down)),
+                y=int(round(roi_small.y * scale_down)),
+                width=int(round(roi_small.width * scale_down)),
+                height=int(round(roi_small.height * scale_down)),
+            )
+
+            roi_px = self._refine_chat_roi_excluding_headers(img_win, roi_px)
+
+            if roi_px.width <= 0 or roi_px.height <= 0:
+                return None
+
+            x = int(round(win_rect.x + (roi_px.x / sx)))
+            y = int(round(win_rect.y + (roi_px.y / sy)))
+            w = int(round(roi_px.width / sx))
+            h = int(round(roi_px.height / sy))
+
+            logical_sw, logical_sh = self._get_logical_screen_size()
+            x = max(0, min(x, max(0, logical_sw - 1)))
+            y = max(0, min(y, max(0, logical_sh - 1)))
+            w = max(1, min(w, max(1, logical_sw - x)))
+            h = max(1, min(h, max(1, logical_sh - y)))
+
+            if w < 200 or h < 200:
+                return None
+
+            return x, y, w, h
+        except Exception:
+            return None
+
+    def _refine_chat_roi_excluding_headers(self, screenshot: Image.Image, roi: Rectangle) -> Rectangle:
+        """对候选聊天区域做二次精修，尽量排除顶部浮层/广告区
+
+        函数级注释：
+        - 某些微信版本在聊天列表顶部会出现置顶提示/广告条，容易被结构线算法误纳入；
+        - 通过对 ROI 内部再做一次 detect_content_roi，收缩到更“活跃”的内容区域；
+        - 只在结果明显更合理时才应用，避免误裁。
+        """
+        try:
+            x0 = max(0, int(roi.x))
+            y0 = max(0, int(roi.y))
+            x1 = min(int(screenshot.width), int(roi.x + roi.width))
+            y1 = min(int(screenshot.height), int(roi.y + roi.height))
+            if x1 <= x0 or y1 <= y0:
+                return roi
+
+            crop = screenshot.crop((x0, y0, x1, y1))
+            refined = self.preprocessor.detect_content_roi(crop, padding=10)
+
+            if refined.width <= 0 or refined.height <= 0:
+                return roi
+
+            if refined.width < int(0.6 * roi.width) or refined.height < int(0.6 * roi.height):
+                return roi
+
+            dx = max(0, int(refined.x))
+            dy = max(0, int(refined.y))
+            return Rectangle(
+                x=int(x0 + dx),
+                y=int(y0 + dy),
+                width=int(min(roi.width, refined.width)),
+                height=int(min(roi.height, refined.height)),
+            )
+        except Exception:
+            return roi
 
     def on_start_scan(self):
         """启动扫描：在后台线程中执行命令并实时输出日志；每次开始创建新的扫描日志文件"""
@@ -499,7 +783,7 @@ class SimpleWechatGUI:
         except Exception:
             pass
         # 切换按钮状态：开始 -> 禁用，停止 -> 启用
-        self.btn_start.configure(state="disabled")
+        self.btn_start.configure(state="disabled", text="扫描中...")
         self.btn_stop.configure(state="normal")
         self.btn_pause.configure(state="normal")
         self.var_status.set("扫描中")
@@ -534,7 +818,7 @@ class SimpleWechatGUI:
                 def restore_buttons():
                     if not getattr(self, "paused", False):
                         self.var_status.set("空闲")
-                        self.btn_start.configure(state="normal")
+                        self.btn_start.configure(state="normal", text="开始扫描")
                         self.btn_stop.configure(state="disabled")
                         self.btn_pause.configure(state="disabled", text="暂停扫描")
                         try:
@@ -559,7 +843,8 @@ class SimpleWechatGUI:
         """生成聊天区域预览图：内置截图逻辑直接截取屏幕区域并显示（不依赖外部脚本）
 
         函数级注释：
-        - 解析 x,y,w,h 后使用 Pillow 的 ImageGrab.grab(bbox=...) 截取指定区域；
+        - 解析 x,y,w,h 后优先使用 pyautogui.screenshot(region=...) 截取指定区域；
+        - 若 pyautogui 不可用则回退到 ImageGrab（按缩放因子自适应 bbox）；
         - 将图片保存到项目 outputs/debug_chat_area_preview.png 并在左侧预览；
         - 相比调用脚本，内置实现减少依赖（无需安装 pyautogui）。
         """
@@ -577,8 +862,7 @@ class SimpleWechatGUI:
             if w <= 0 or h <= 0:
                 messagebox.showerror("错误", "宽或高必须为正数")
                 return
-            bbox = (x, y, x + w, y + h)
-            img = ImageGrab.grab(bbox=bbox)
+            img = self._capture_region_for_preview(x, y, w, h)
             os.makedirs(os.path.dirname(out_png), exist_ok=True)
             img.save(out_png)
             # 限制最大宽度为 350，防止撑破窄窗口布局
@@ -594,75 +878,211 @@ class SimpleWechatGUI:
         """通过屏幕截图 + Canvas 框选的方式，生成聊天区域坐标并回填到输入框
 
         函数级注释：
-        - 使用 Pillow 的 ImageGrab 抓取屏幕快照；
-        - 在 Toplevel 窗口的 Canvas 上绑定鼠标事件以绘制选区；
-        - 根据显示缩放比换算为真实屏幕坐标，更新 var_chat_area。
+        - 修复策略：回归标准 Tkinter 事件处理模式，移除过度优化的预创建逻辑（导致了功能回退）；
+        - 性能保障：矩形更新（coords）不限频，确保视觉跟手；仅文本更新限频；
+        - 交互优化：添加 grab_set/focus_force 确保窗口独占焦点，防止操作丢失；
+        - 优先策略：自动识别微信聊天区域并直接回填；若识别失败则进入手动框选模式。
+        - 坐标系：输出统一为“逻辑坐标(pt)”的 x,y,w,h（与扫描的 region 坐标一致）。
         """
         try:
+            # 1. 抓取屏幕
+            self.root.config(cursor="watch")
+            self.root.update_idletasks()
             screenshot = ImageGrab.grab()
         except Exception as e:
-            messagebox.showerror("错误", f"无法抓取屏幕截图，请检查屏幕录制权限：{e}")
+            messagebox.showerror("错误", f"无法抓取屏幕截图: {e}")
+            return
+        finally:
+            self.root.config(cursor="")
+
+        try:
+            auto_rect = self._smart_detect_chat_area(screenshot)
+            if auto_rect:
+                x, y, w, h = auto_rect
+                result_str = f"{x},{y},{w},{h}"
+                self.var_chat_area.set(result_str)
+                self._append_log(f"智能识别聊天区域: {result_str}")
+                try:
+                    self.root.after(100, self._update_preview_from_chat_area)
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+
+        # 2. 计算缩放比例 (将高分屏截图适配到窗口逻辑尺寸)
+        # 设定最大显示尺寸
+        MAX_W, MAX_H = 1400, 900
+        sw, sh = screenshot.width, screenshot.height
+        
+        # 计算缩放比
+        scale_w = MAX_W / sw
+        scale_h = MAX_H / sh
+        scale = min(scale_w, scale_h, 1.0) # 不放大，仅缩小
+        
+        disp_w = int(sw * scale)
+        disp_h = int(sh * scale)
+        
+        # 缩放图片用于显示
+        try:
+            display_img = screenshot.resize((disp_w, disp_h), Image.BILINEAR)
+            photo = ImageTk.PhotoImage(display_img)
+        except Exception as e:
+            messagebox.showerror("错误", f"图片处理失败: {e}")
             return
 
-        # 计算显示缩放，控制在合理窗口尺寸
-        max_w, max_h = 1200, 800
-        sw, sh = screenshot.width, screenshot.height
-        scale = min(max_w / sw, max_h / sh)
-        if scale > 1:
-            scale = 1.0
-        disp_w, disp_h = int(sw * scale), int(sh * scale)
-        display_img = screenshot.resize((disp_w, disp_h), Image.LANCZOS)
-        photo = ImageTk.PhotoImage(display_img)
-
+        # 3. 创建全屏/大窗口
         top = tk.Toplevel(self.root)
-        top.title("框选聊天区域（按拖拽左键选区，松开结束）")
-        top.geometry(f"{disp_w}x{disp_h}")
-        canvas = tk.Canvas(top, width=disp_w, height=disp_h, cursor="cross")
-        canvas.pack()
-        canvas.create_image(0, 0, image=photo, anchor=tk.NW)
-        # 防止图片被 GC 回收
-        canvas.image = photo
+        top.title("框选聊天区域")
+        # 居中显示
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        pos_x = (screen_w - disp_w) // 2
+        pos_y = (screen_h - disp_h) // 2
+        top.geometry(f"{disp_w}x{disp_h}+{pos_x}+{pos_y}")
+        
+        # 独占模式，防止用户误点背景
+        top.grab_set()
+        top.focus_force()
 
-        rect_id = {"id": None}
-        state = {"x0": 0, "y0": 0}
+        # 4. 绘图画布
+        canvas = tk.Canvas(top, width=disp_w, height=disp_h, cursor="crosshair", highlightthickness=0)
+        canvas.pack(fill=tk.BOTH, expand=True)
+        image_id = canvas.create_image(0, 0, image=photo, anchor=tk.NW)
+        canvas.image = photo # 保持引用
+
+        top.update_idletasks()
+        img_bbox = canvas.bbox(image_id) or (0, 0, disp_w, disp_h)
+        img_x0, img_y0, img_x1, img_y1 = img_bbox
+        img_disp_w = max(1, int(img_x1 - img_x0))
+        img_disp_h = max(1, int(img_y1 - img_y0))
+        logical_sw, logical_sh = self._get_logical_screen_size()
+        ratio_x = logical_sw / float(img_disp_w)
+        ratio_y = logical_sh / float(img_disp_h)
+
+        def clamp_to_image(x: int, y: int):
+            """将画布坐标限制在截图图像可见区域内，避免越界导致映射偏移。"""
+            cx = max(int(img_x0), min(int(x), int(img_x1)))
+            cy = max(int(img_y0), min(int(y), int(img_y1)))
+            return cx, cy
+
+        # 5. 交互状态
+        state = {
+            "start_x": 0,
+            "start_y": 0,
+            "rect_id": None,
+            "text_id": None,
+            "bg_rect_id": None, # 文本背景
+            "is_dragging": False,
+            "last_text_update": 0.0
+        }
 
         def on_press(event):
-            """鼠标按下事件：记录起点并创建矩形框"""
-            state["x0"], state["y0"] = event.x, event.y
-            if rect_id["id"]:
-                canvas.delete(rect_id["id"])
-            rect_id["id"] = canvas.create_rectangle(event.x, event.y, event.x, event.y, outline="red", width=2)
+            sx, sy = clamp_to_image(event.x, event.y)
+            state["start_x"] = sx
+            state["start_y"] = sy
+            state["is_dragging"] = True
+            
+            # 清理旧图形（如果有）
+            if state["rect_id"]: canvas.delete(state["rect_id"])
+            if state["text_id"]: canvas.delete(state["text_id"])
+            if state["bg_rect_id"]: canvas.delete(state["bg_rect_id"])
+            
+            # 创建新图形 (红色边框，无填充)
+            state["rect_id"] = canvas.create_rectangle(
+                event.x, event.y, event.x, event.y,
+                outline="#ff0000", width=2, dash=(4, 4) # 虚线框增加可见性
+            )
+            # 文本提示 (初始隐藏)
+            state["bg_rect_id"] = canvas.create_rectangle(0,0,0,0, fill="black", outline="red", stipple="gray50", state="hidden")
+            state["text_id"] = canvas.create_text(0, 0, text="", fill="white", font=("Arial", 10, "bold"), anchor="nw", state="hidden")
 
         def on_move(event):
-            """拖动事件：更新选区矩形的右下角坐标"""
-            if rect_id["id"]:
-                canvas.coords(rect_id["id"], state["x0"], state["y0"], event.x, event.y)
+            if not state["is_dragging"] or not state["rect_id"]:
+                return
+
+            cur_x, cur_y = clamp_to_image(event.x, event.y)
+            start_x, start_y = state["start_x"], state["start_y"]
+
+            # 1. 矩形更新：无节流，追求最高帧率
+            canvas.coords(state["rect_id"], start_x, start_y, cur_x, cur_y)
+
+            # 2. 文本更新：节流 (约 30ms 更新一次，避免 text 渲染拖慢矩形)
+            now = time.perf_counter()
+            if now - state["last_text_update"] > 0.03:
+                w = abs(cur_x - start_x)
+                h = abs(cur_y - start_y)
+                
+                # 计算真实尺寸
+                real_w = int(w * ratio_x)
+                real_h = int(h * ratio_y)
+                txt = f"{real_w} x {real_h}"
+                
+                # 文本位置跟随鼠标，稍微偏移
+                tx, ty = cur_x + 10, cur_y + 10
+                # 边界处理
+                if tx + 80 > img_x1: tx = cur_x - 90
+                if ty + 30 > img_y1: ty = cur_y - 40
+                
+                canvas.coords(state["text_id"], tx + 5, ty + 5)
+                canvas.itemconfigure(state["text_id"], text=txt, state="normal")
+                canvas.tag_raise(state["text_id"])
+                
+                # 更新文本背景
+                bbox = canvas.bbox(state["text_id"])
+                if bbox:
+                    canvas.coords(state["bg_rect_id"], bbox[0]-2, bbox[1]-2, bbox[2]+2, bbox[3]+2)
+                    canvas.itemconfigure(state["bg_rect_id"], state="normal")
+                    canvas.tag_raise(state["bg_rect_id"])
+                    canvas.tag_raise(state["text_id"]) # 文字在背景上
+                
+                state["last_text_update"] = now
 
         def on_release(event):
-            """释放事件：计算真实屏幕坐标并写入 var_chat_area"""
-            x1, y1 = event.x, event.y
-            x0, y0 = state["x0"], state["y0"]
-            x_min, y_min = min(x0, x1), min(y0, y1)
-            w = abs(x1 - x0)
-            h = abs(y1 - y0)
-            if w < 3 or h < 3:
-                messagebox.showinfo("提示", "选区过小，请重新框选")
+            if not state["is_dragging"]:
                 return
-            real_x = int(x_min / scale)
-            real_y = int(y_min / scale)
-            real_w = int(w / scale)
-            real_h = int(h / scale)
-            self.var_chat_area.set(f"{real_x},{real_y},{real_w},{real_h}")
-            self._append_log(f"框选坐标: {self.var_chat_area.get()}")
-            # 自动更新预览图
+            state["is_dragging"] = False
+            
+            x0, y0 = state["start_x"], state["start_y"]
+            x1, y1 = clamp_to_image(event.x, event.y)
+            
+            x_min, x_max = sorted([x0, x1])
+            y_min, y_max = sorted([y0, y1])
+            w = x_max - x_min
+            h = y_max - y_min
+            
+            if w < 5 or h < 5:
+                # 误触或点击，不关闭，允许重画
+                if state["rect_id"]: canvas.delete(state["rect_id"])
+                if state["text_id"]: canvas.delete(state["text_id"])
+                if state["bg_rect_id"]: canvas.delete(state["bg_rect_id"])
+                return
+            
+            # 计算真实坐标
+            real_x = int((x_min - img_x0) * ratio_x)
+            real_y = int((y_min - img_y0) * ratio_y)
+            real_w = int(w * ratio_x)
+            real_h = int(h * ratio_y)
+
+            real_x = max(0, min(real_x, logical_sw - 1))
+            real_y = max(0, min(real_y, logical_sh - 1))
+            real_w = max(1, min(real_w, logical_sw - real_x))
+            real_h = max(1, min(real_h, logical_sh - real_y))
+            
+            result_str = f"{real_x},{real_y},{real_w},{real_h}"
+            self.var_chat_area.set(result_str)
+            self._append_log(f"框选完成: {result_str}")
+            
+            # 更新主界面预览
             self.root.after(100, self._update_preview_from_chat_area)
+            
+            # 关闭窗口
             top.destroy()
 
         canvas.bind("<ButtonPress-1>", on_press)
         canvas.bind("<B1-Motion>", on_move)
         canvas.bind("<ButtonRelease-1>", on_release)
-        # 允许按 Esc 取消并关闭窗口
-        top.bind("<Escape>", lambda _: top.destroy())
+        top.bind("<Escape>", lambda e: top.destroy())
 
     def _render_message_style_preview(self):
         """在 Canvas 中绘制两条示例引用气泡，分别标注“对方”与“我”。
@@ -880,13 +1300,14 @@ class SimpleWechatGUI:
         """停止扫描子进程并恢复按钮状态；关闭当前扫描日志文件"""
         if hasattr(self, "scan_proc") and self.scan_proc and self.scan_proc.poll() is None:
             try:
-                self.scan_proc.terminate()
-                self._append_log("已请求终止扫描进程…")
+                # 使用 SIGINT (Ctrl+C) 而非 terminate (SIGTERM)，以便 Python 脚本能捕获 KeyboardInterrupt 并保存结果
+                self.scan_proc.send_signal(signal.SIGINT)
+                self._append_log("已请求停止扫描（发送 SIGINT）…")
                 try:
                     code = self.scan_proc.wait(timeout=5)
                     self._append_log(f"扫描进程已结束，退出码: {code}")
                 except subprocess.TimeoutExpired:
-                    self._append_log("终止超时，将强制结束进程…")
+                    self._append_log("停止超时，将强制结束进程…")
                     try:
                         self.scan_proc.kill()
                         code = self.scan_proc.wait(timeout=3)
@@ -894,7 +1315,7 @@ class SimpleWechatGUI:
                     except Exception as e:
                         self._append_log(f"强制结束失败: {e}")
             except Exception as e:
-                self._append_log(f"终止失败: {e}")
+                self._append_log(f"停止失败: {e}")
         else:
             self._append_log("当前无正在运行的扫描进程。")
         # 恢复按钮状态

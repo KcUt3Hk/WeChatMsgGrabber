@@ -54,6 +54,8 @@ class Message:
     # - quote_meta: 若消息包含“引用气泡”，保留原始昵称与身份标签，并提取纯文本内容以供 UI 渲染。
     share_card: Optional["ShareCard"] = None
     quote_meta: Optional["QuoteMeta"] = None
+    # 原始区域信息（用于图片/视频消息的后续处理，如截图保存或点击交互）
+    original_region: Optional["Rectangle"] = None
 
     def stable_key(self) -> str:
         """Return a stable deduplication key for this message.
@@ -67,19 +69,9 @@ class Message:
         - 否则回退到 sender + 秒级时间戳 + 去空白后的 content，以提升同一轮扫描内的稳定性。
         """
         if self.id:
-            # 忽略临时生成的随机 UUID，避免阻断内容级去重
-            try:
-                u = uuid.UUID(str(self.id))
-                # 当为 v4（典型的随机 UUID）时，视为不稳定主键，改用内容回退键
-                if u.version != 4:
-                    return str(self.id)
-            except Exception:
-                # 非 UUID 字符串（如业务主键），直接使用
-                return str(self.id)
-        
-        # 降低时间戳精度到秒级别，避免微秒级差异导致重复
-        rounded_timestamp = self.timestamp.replace(microsecond=0).isoformat()
-        return f"{self.sender}|{rounded_timestamp}|{self.content.strip()}"
+            return str(self.id)
+
+        return f"{self.sender}|{self.timestamp.isoformat()}|{self.content.strip()}"
 
 
 @dataclass
@@ -138,3 +130,4 @@ class TextRegion:
     text: str
     bounding_box: Rectangle
     confidence: float
+    type: str = "text"  # "text" or "image"

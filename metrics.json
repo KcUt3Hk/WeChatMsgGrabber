@@ -1,42 +1,38 @@
 {
-  "schema_version": "1.0",
-  "timestamp": "2025-11-24T16:07:29Z",
-  "data": {
-    "latency_ms_avg": {
-      "process_image": 0.0,
-      "detect_regions": 0.0,
-      "ocr_engine": 0.0
+  "latency_ms_avg": {
+    "process_image": 0.0,
+    "detect_regions": 0.0,
+    "ocr_engine": 0.0
+  },
+  "cache_stats": {
+    "full_image_cache": {
+      "size": 0,
+      "capacity": 0,
+      "hit_rate": 0.0,
+      "hits": 0,
+      "misses": 0,
+      "evictions": 0
     },
-    "cache_stats": {
-      "full_image_cache": {
-        "size": 0,
-        "capacity": 0,
-        "hit_rate": 0.0,
-        "hits": 0,
-        "misses": 0,
-        "evictions": 0
-      },
-      "region_cache": {
-        "size": 0,
-        "capacity": 0,
-        "hit_rate": 0.0,
-        "hits": 0,
-        "misses": 0,
-        "evictions": 0
-      },
-      "ocr_cache": {
-        "size": 0,
-        "capacity": 0,
-        "hit_rate": 0.0,
-        "hits": 0,
-        "misses": 0,
-        "evictions": 0
-      }
+    "region_cache": {
+      "size": 0,
+      "capacity": 0,
+      "hit_rate": 0.0,
+      "hits": 0,
+      "misses": 0,
+      "evictions": 0
     },
-    "counters": {
-      "process_image_calls": 0,
-      "detect_regions_calls": 0,
-      "ocr_engine_calls": 0
+    "ocr_cache": {
+      "size": 0,
+      "capacity": 0,
+      "hit_rate": 0.0,
+      "hits": 0,
+      "misses": 0,
+      "evictions": 0
     }
+  },
+  "counters": {
+    "process_image_calls": 0,
+    "detect_regions_calls": 0,
+    "ocr_engine_calls": 0
   }
 }

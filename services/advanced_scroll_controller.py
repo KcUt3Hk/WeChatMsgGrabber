@@ -5,14 +5,20 @@
 import time
 import random
 import logging
+import os
+import uuid
 from typing import Optional, Tuple, List, Dict, Any
 import pyautogui
 from PIL import Image
 import numpy as np
 
-from models.data_models import WindowInfo, Rectangle
+from models.data_models import WindowInfo, Rectangle, MessageType, Message
 from services.auto_scroll_controller import AutoScrollController
 from services.image_preprocessor import ImagePreprocessor
+from services.ocr_processor import OCRProcessor
+from services.image_validator import ImageValidator
+from services.image_deduplicator import ImageDeduplicator
+from services.config_manager import ConfigManager
 
 
 class AdvancedScrollController(AutoScrollController):
@@ -25,7 +31,8 @@ class AdvancedScrollController(AutoScrollController):
                  scroll_interval_range: Tuple[float, float] = (0.3, 0.5),
                  inertial_effect: bool = True,
                  enable_watchdog: Optional[bool] = None,
-                 watchdog_interval: float = 5.0):
+                 watchdog_interval: float = 5.0,
+                 on_state_captured: Optional[Any] = None):
         """
         初始化高级滚动控制器
         
@@ -37,16 +44,21 @@ class AdvancedScrollController(AutoScrollController):
             inertial_effect: 是否启用滑动惯性效果
             enable_watchdog: 是否启用看门狗线程（默认通过环境变量控制）
             watchdog_interval: 看门狗心跳检查间隔（秒）
+            on_state_captured: 状态捕获回调函数，签名 func(state: dict)
         """
         # 传递看门狗配置到父类，父类将基于环境变量或参数决定是否开启
         super().__init__(scroll_speed, scroll_delay, enable_macos_fallback=None, enable_watchdog=enable_watchdog, watchdog_interval=watchdog_interval)
         self.scroll_distance_range = scroll_distance_range
         self.scroll_interval_range = scroll_interval_range
         self.inertial_effect = inertial_effect
+        self.on_state_captured = on_state_captured
         self.logger = logging.getLogger(__name__)
         
         # 初始化图像预处理器
         self.pre = ImagePreprocessor()
+        
+        # 初始化图片去重器 (阈值5，约95%相似度)
+        self.deduplicator = ImageDeduplicator(threshold=5)
         
         # 初始化 OCR 和解析器（延迟加载，避免多实例开销）
         # 函数级注释：
@@ -96,21 +108,27 @@ class AdvancedScrollController(AutoScrollController):
             from services.message_parser import MessageParser
             
             if self.ocr is None:
+                self.logger.debug("DEBUG: Instantiating OCRProcessor")
                 self.ocr = OCRProcessor()
             if not self.ocr.is_engine_ready():
                 self.logger.info("正在初始化 OCR 引擎...")
+                self.logger.debug("DEBUG: Calling self.ocr.initialize_engine()")
                 self.ocr.initialize_engine()
+                self.logger.debug("DEBUG: self.ocr.initialize_engine() returned")
                 
             if self.parser is None:
+                self.logger.debug("DEBUG: Instantiating MessageParser")
                 self.parser = MessageParser()
         except Exception as e:
-            self.logger.error(f"OCR引擎初始化失败: {e}")
+            self.logger.error(f"OCR引擎初始化失败: {e}", exc_info=True)
             return results
 
         # 定位初始位置
+        self.logger.debug("DEBUG: Calling _locate_initial_position()")
         if not self._locate_initial_position():
             self.logger.error("无法定位初始滚动位置")
             return results
+        self.logger.debug(f"DEBUG: Initial position located: {self.current_position}")
         
         scroll_count = 0
         consecutive_no_change = 0
@@ -134,7 +152,9 @@ class AdvancedScrollController(AutoScrollController):
             # - 当 direction="up" 时，边缘检测使用 is_at_top；
             # - 当 direction="down" 时，边缘检测使用 is_at_bottom；
             # - 这样在 CLI 从顶部开始向下扫描的场景下，不会因为“已在顶部”而误触发终止。
-            if self._check_stop_conditions(current_state, target_content, stop_at_edges, direction):
+            # - 修改：前2次滚动不进行边缘检测，防止因初始位置检测误判（如“微小滚动未造成视觉变化”）导致过早终止。
+            should_check_edge = stop_at_edges and (scroll_count > 2)
+            if self._check_stop_conditions(current_state, target_content, should_check_edge, direction):
                 self.logger.info(f"满足终止条件，停止滚动 (第{scroll_count}次滚动)")
                 break
             
@@ -188,7 +208,33 @@ class AdvancedScrollController(AutoScrollController):
         
         # 停止看门狗
         self.stop_watchdog()
+        self.end_time = time.time()
         return results
+
+    def get_scroll_statistics(self) -> Dict[str, Any]:
+        """获取最近一次滚动的统计信息
+        
+        函数级注释：
+        - 返回包含开始时间、结束时间、累计滚动次数、每分钟滚动速率等统计数据的字典；
+        - 用于任务总结报告生成；
+        - 若尚未进行滚动或数据不全，返回空字典或部分数据。
+        """
+        if not self.start_time:
+            return {}
+        
+        end_t = self.end_time or time.time()
+        duration = max(0.001, end_t - self.start_time)
+        total_scrolls = len(self.scroll_history)
+        spm = (total_scrolls / duration) * 60 if duration > 0 else 0
+        
+        return {
+            "start_time": self.start_time,
+            "end_time": end_t,
+            "duration_seconds": duration,
+            "total_scrolls": total_scrolls,
+            "scrolls_per_minute": spm,
+            "history_count": len(self.scroll_history)
+        }
 
     def set_spm_range(self, spm_min: int, spm_max: int) -> None:
         """设置滚动速率的每分钟区间（min,max），委托给基础控制器。"""
@@ -196,6 +242,111 @@ class AdvancedScrollController(AutoScrollController):
             super().set_spm_range(spm_min, spm_max)
         except Exception:
             pass
+
+    def _save_image_messages(self, messages: List[Any], screenshot: Image.Image) -> None:
+        """
+        保存图片类型的消息内容
+        
+        函数级注释：
+        - 遍历解析出的消息，识别 Image 类型消息；
+        - 基于消息的 rect 属性从完整截图中裁剪出图片区域；
+        - 过滤过小尺寸（如 50x50 以下）以排除误识别或纯色块；
+        - 保存图片到 output/images 并更新消息 content 为文件路径。
+        """
+        if not screenshot or not messages:
+            return
+
+        cfg_mgr = ConfigManager()
+        try:
+            cfg = cfg_mgr.get_config()
+            base_out_dir = (cfg.output.directory if cfg and cfg.output else None) or "./output"
+        except Exception:
+            base_out_dir = "./output"
+
+        images_dir = os.path.join(os.path.abspath(base_out_dir), "images")
+        os.makedirs(images_dir, exist_ok=True)
+
+        for msg in messages:
+            # 检查消息类型 (MessageType.IMAGE)
+            # 修复：Message 对象属性为 message_type 而非 type
+            msg_type = getattr(msg, 'message_type', getattr(msg, 'type', None))
+            
+            if msg_type in (MessageType.IMAGE, MessageType.STICKER) or (
+                msg_type == MessageType.UNKNOWN and not (getattr(msg, "content", "") or "").strip()
+            ):
+                # 修复：Message 对象属性为 original_region 而非 rect
+                region = getattr(msg, 'original_region', getattr(msg, 'rect', None))
+                
+                if region:
+                    try:
+                        # 获取图片区域坐标
+                        x, y = int(region.x), int(region.y)
+                        w, h = int(region.width), int(region.height)
+                        
+                        # 增加调试日志
+                        self.logger.info(f"Processing image msg {msg.id}: region=({x}, {y}, {w}, {h}), screenshot_size={screenshot.size}")
+
+                        # 检查坐标有效性
+                        img_w, img_h = screenshot.size
+                        
+                        # 边界检查
+                        if x < 0 or y < 0 or x + w > img_w or y + h > img_h:
+                             self.logger.warning(f"Coordinates out of bounds for msg {msg.id}: {x},{y},{w},{h} vs {screenshot.size}")
+                             x = max(0, x)
+                             y = max(0, y)
+                             w = min(w, img_w - x)
+                             h = min(h, img_h - y)
+                        
+                        # 过滤无效或过小的区域（修复 50x50 纯白图片问题）
+                        if w > 50 and h > 50:
+                            # 裁剪图片
+                            cropped = screenshot.crop((x, y, x + w, y + h))
+
+                            # [NEW] 内容校验：排除纯色块或无效内容
+                            if not ImageValidator.is_valid_image_content(cropped):
+                                self.logger.warning(f"Rejected image msg {getattr(msg, 'id', 'unknown')}: Content validation failed (likely chat bubble/UI screenshot).")
+                                msg.content = "[Invalid Image - Likely Text Bubble]"
+                                try:
+                                    msg.message_type = MessageType.UNKNOWN
+                                except Exception:
+                                    pass
+                                continue
+                            
+                            # [NEW] 图片去重：基于内容相似度过滤重复图片
+                            if self.deduplicator.is_duplicate(cropped):
+                                self.logger.info(f"Skipped duplicate image msg {getattr(msg, 'id', 'unknown')}")
+                                # 标记为重复，不保存文件，但保留消息记录（或者标记为重复内容）
+                                msg.content = "[Duplicate Image]"
+                                # 也可以选择保留上一张图片的路径，这里简单标记
+                                continue
+
+                            # 生成文件名 (优先使用 msg.id 以支持去重)
+                            if hasattr(msg, 'id') and msg.id:
+                                filename = f"{msg.id}.png"
+                            else:
+                                filename = f"{uuid.uuid4().hex}.png"
+                            
+                            filepath = os.path.join(images_dir, filename)
+                            
+                            # 保存图片
+                            cropped.save(filepath)
+                            
+                            # 注册到去重器
+                            self.deduplicator.add_image(cropped, filepath)
+                            
+                            # 更新消息内容为图片路径
+                            msg.content = filepath
+                            try:
+                                if getattr(msg, "message_type", None) == MessageType.UNKNOWN:
+                                    msg.message_type = MessageType.IMAGE
+                            except Exception:
+                                pass
+                            self.logger.info(f"Saved image for msg {msg.id} to {filepath}")
+                        else:
+                            self.logger.info(f"Skipped small image msg {msg.id}: {w}x{h}")
+                            
+                    except Exception as e:
+                        self.logger.error(f"保存图片消息失败: {e}")
 
     def _locate_initial_position(self) -> bool:
         """定位初始滚动位置"""
@@ -220,6 +371,19 @@ class AdvancedScrollController(AutoScrollController):
 
     def _capture_scroll_state(self, scroll_count: int) -> Dict[str, Any]:
         """捕获当前滚动状态"""
+        # 捕获截图
+        raw_screenshot = self.capture_current_view()
+        
+        # 应用隐私保护（绿色气泡模糊）
+        # 函数级注释：
+        # - 在原始分辨率下进行颜色检测与模糊，确保识别准确性；
+        # - 保护后的图片将用于后续的 OCR（确保OCR无法识别敏感内容）和图片消息保存。
+        if raw_screenshot:
+            try:
+                raw_screenshot = self.pre.apply_privacy_protection(raw_screenshot)
+            except Exception as e:
+                self.logger.warning(f"应用隐私保护失败: {e}")
+
         state = {
             "scroll_count": scroll_count,
             "timestamp": time.time(),
@@ -229,7 +393,7 @@ class AdvancedScrollController(AutoScrollController):
             # - 原始截图可能为高分辨率，长时间运行会导致内存压力；
             # - 通过 _maybe_downscale_image 限制最大宽度来降低内存；
             # - 若 capture 失败则保持 None，后续流程具备容错。
-            "screenshot": self._maybe_downscale_image(self.capture_current_view(), max_width=1400),
+            "screenshot": self._maybe_downscale_image(raw_screenshot, max_width=1400),
             "window_info": self.current_window,
             "scroll_speed": self.scroll_speed,
             "scroll_delay": self.scroll_delay
@@ -256,9 +420,26 @@ class AdvancedScrollController(AutoScrollController):
                 optimized = self.optimize_screenshot_quality(state["screenshot"])
                 preprocessed = self.pre.preprocess_for_ocr(optimized)
                 
-                # 提取文本区域
-                text_regions = self.ocr.extract_text_regions(preprocessed)
+                # 提取文本区域 (优先使用区域检测，与 MainController 保持一致)
+                text_regions = []
+                try:
+                    region_results = self.ocr.detect_and_process_regions(preprocessed)
+                    text_regions = [tr for tr, _ in region_results]
+                except Exception as e:
+                    self.logger.warning(f"区域检测失败，回退到整图 OCR: {e}")
+                
+                if not text_regions:
+                    self.logger.debug("区域检测未发现文本，尝试整图 OCR")
+                    text_regions = self.ocr.extract_text_regions(preprocessed)
+
                 messages = self.parser.parse(text_regions)
+                
+                # 保存图片消息
+                # 函数级注释：
+                # - 解析完成后立即调用 _save_image_messages；
+                # - 确保消息对象中的图片路径被更新为本地文件路径；
+                # - 同时利用当前内存中的 screenshot 进行裁剪，避免后续需要重新加载。
+                self._save_image_messages(messages, state["screenshot"])
                 
                 state["messages"] = messages
                 state["message_count"] = len(messages)
@@ -270,6 +451,13 @@ class AdvancedScrollController(AutoScrollController):
                 state["message_count"] = 0
                 state["content_summary"] = ""
         
+        # 触发回调（如果存在）
+        if self.on_state_captured:
+            try:
+                self.on_state_captured(state)
+            except Exception as e:
+                self.logger.warning(f"状态捕获回调执行失败: {e}")
+
         self.scroll_history.append(state)
         return state
 

@@ -173,14 +173,14 @@ class StorageManager:
         if fmt == "csv":
             path = self._generate_filename(filename_prefix, "csv")
             # 动态移除被排除的字段
-            default_fields = ["id", "sender", "content", "message_type", "timestamp", "message_time", "confidence_score", "raw_ocr_text"]
+            default_fields = ["id", "sender", "content", "message_type", "timestamp", "confidence_score", "raw_ocr_text"]
             try:
                 exclude = set((self.config and getattr(self.config, 'exclude_fields', []) ) or [])
             except Exception:
                 exclude = set()
             fieldnames = [f for f in default_fields if f not in exclude]
             with path.open("w", encoding="utf-8", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
                 writer.writeheader()
                 for m in messages:
                     writer.writerow(self._message_to_dict(m))
@@ -284,6 +284,71 @@ class StorageManager:
             path = self._write_messages(messages, fmt, filename_prefix)
             paths.append(path)
         return paths
+
+    def append_messages_to_file(self, messages: List[Message], file_path: Path, fmt: str) -> None:
+        """Append messages to an existing file.
+        
+        Args:
+            messages: List of messages to append.
+            file_path: Path to the target file.
+            fmt: Output format (json, csv, txt, md).
+        """
+        if not messages:
+            return
+
+        fmt = (fmt or "json").lower()
+        if fmt not in {"json", "csv", "txt", "md"}:
+            raise ValueError(f"Unsupported output format: {fmt}")
+
+        # Ensure directory exists
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # For JSON, we use JSON Lines (one JSON object per line) for appendability
+        # Standard JSON array cannot be easily appended to without reading the whole file.
+        if fmt == "json":
+            with file_path.open("a", encoding="utf-8") as f:
+                for m in messages:
+                    # Compact JSON line
+                    json.dump(self._message_to_dict(m), f, ensure_ascii=False)
+                    f.write("\n")
+            return
+
+        if fmt == "csv":
+            # 动态移除被排除的字段
+            default_fields = ["id", "sender", "content", "message_type", "timestamp", "message_time", "confidence_score", "raw_ocr_text"]
+            try:
+                exclude = set((self.config and getattr(self.config, 'exclude_fields', []) ) or [])
+            except Exception:
+                exclude = set()
+            fieldnames = [f for f in default_fields if f not in exclude]
+            
+            # Check if file exists and is empty to write header
+            write_header = not file_path.exists() or file_path.stat().st_size == 0
+            
+            with file_path.open("a", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if write_header:
+                    writer.writeheader()
+                for m in messages:
+                    writer.writerow(self._message_to_dict(m))
+            return
+
+        if fmt == "txt":
+            with file_path.open("a", encoding="utf-8") as f:
+                for m in messages:
+                    f.write(self._format_txt_message(m) + "\n")
+            return
+
+        if fmt == "md":
+            # Check if file exists and is empty to write header
+            write_header = not file_path.exists() or file_path.stat().st_size == 0
+            
+            with file_path.open("a", encoding="utf-8") as f:
+                if write_header:
+                    f.write(f"# WeChat Chat Export\n\n")
+                for m in messages:
+                    f.write(self._format_markdown_message(m) + "\n")
+            return
 
     def _is_time_only_content(self, text: str) -> bool:
         """Detect if content is a pure time/date marker (e.g., chat separators).

@@ -8,11 +8,15 @@ from typing import List, Optional
 from models.data_models import Message, MessageType
 from datetime import datetime
 import uuid
+import os
+from PIL import Image
 from services.auto_scroll_controller import AutoScrollController
 from services.advanced_scroll_controller import AdvancedScrollController
 from services.image_preprocessor import ImagePreprocessor
 from services.ocr_processor import OCRProcessor
 from services.message_parser import MessageParser
+from services.image_validator import ImageValidator
+from services.image_deduplicator import ImageDeduplicator
 from services.config_manager import ConfigManager
 from services.storage_manager import StorageManager
 from models.config import AppConfig, OutputConfig
@@ -28,7 +32,10 @@ class MainController:
         self.pre = ImagePreprocessor()
         self.ocr = OCRProcessor()
         self.parser = MessageParser()
+        # 初始化图片去重器
+        self.deduplicator = ImageDeduplicator(threshold=5)
         self.last_scroll_stats: dict | None = None
+        self._images_output_dir: str | None = None
 
     def run_once(self) -> List[Message]:
         """Run a single extraction cycle on current chat view.
@@ -95,6 +102,10 @@ class MainController:
 
         # Parse text regions into messages
         messages = self.parser.parse(text_regions)
+
+        # 自动保存图片消息（使用消息ID命名）
+        if img and messages:
+            self._save_image_messages(messages, img)
 
         return messages
 
@@ -206,6 +217,14 @@ class MainController:
 
             # 捕获聊天区域截图（若失败尝试一次窗口重定位/激活再重试）
             screenshot = self.scroll.capture_current_view()
+            if screenshot:
+                # DEBUG: Save every screenshot to verify capture content
+                debug_dir = os.path.join(os.getcwd(), "output", "debug_screenshots")
+                os.makedirs(debug_dir, exist_ok=True)
+                debug_path = os.path.join(debug_dir, f"scan_batch_{batches_done}_{int(time.time())}.png")
+                screenshot.save(debug_path)
+                self.logger.info(f"DEBUG: Saved batch screenshot to {debug_path}")
+
             if not screenshot:
                 self.logger.warning("首次截图失败，尝试重定位/激活窗口后重试……")
                 try:
@@ -257,6 +276,10 @@ class MainController:
             except Exception as e:
                 self.logger.error(f"消息解析失败：{e}")
                 new_messages = []
+
+            # 自动保存图片消息（使用消息ID命名，便于后续关联）
+            if screenshot and new_messages:
+                self._save_image_messages(new_messages, screenshot)
 
             # 批次去重控制
             batch_messages: List[Message] = []
@@ -457,6 +480,132 @@ class MainController:
                 # Assign current context time
                 msg.message_time = current_context_time
 
+    def _save_image_messages(self, messages: List[Message], screenshot: Image.Image) -> None:
+        """Save image messages to disk using their message ID as filename.
+        
+        Args:
+            messages: List of parsed messages from the current screenshot.
+            screenshot: The screenshot image (PIL Image).
+        """
+        try:
+            # 检查截图分辨率是否合规 (用户建议最小 800x600)
+            if screenshot.width < 800 or screenshot.height < 600:
+                self.logger.warning(f"Screenshot resolution {screenshot.size} is below recommended 800x600. Image quality might be low.")
+
+            cfg_mgr = ConfigManager()
+            try:
+                cfg = cfg_mgr.get_config()
+                base_out_dir = (self._images_output_dir or (cfg.output.directory if cfg and cfg.output else None) or "./output")
+            except Exception:
+                base_out_dir = (self._images_output_dir or "./output")
+
+            images_dir = os.path.join(os.path.abspath(base_out_dir), "images")
+            
+            try:
+                os.makedirs(images_dir, exist_ok=True)
+                # Check write permissions
+                if not os.access(images_dir, os.W_OK):
+                     self.logger.error(f"Output directory {images_dir} is not writable.")
+                     return
+            except Exception as e:
+                self.logger.error(f"Failed to create/access output directory {images_dir}: {e}")
+                return
+
+            image_candidates = [
+                m
+                for m in messages
+                if (
+                    m.original_region
+                    and (
+                        m.message_type in (MessageType.IMAGE, MessageType.STICKER)
+                        or (m.message_type == MessageType.UNKNOWN and not (m.content or "").strip())
+                    )
+                )
+            ]
+            if image_candidates:
+                self.logger.info(f"Detected {len(image_candidates)} image/sticker candidates in this batch")
+
+            for msg in image_candidates:
+                # Save both regular images and stickers/emojis
+                try:
+                    rect = msg.original_region
+                    x, y = rect.x, rect.y
+                    w, h = rect.width, rect.height
+
+                    img_w, img_h = screenshot.size
+                    x = max(0, min(x, img_w - 1))
+                    y = max(0, min(y, img_h - 1))
+                    w = min(w, img_w - x)
+                    h = min(h, img_h - y)
+
+                    self.logger.info(f"Processing image msg {msg.id}: region=({x}, {y}, {w}, {h}), screenshot_size={screenshot.size}")
+
+                    if w > 50 and h > 50:
+                        try:
+                            if x < 0 or y < 0 or x + w > screenshot.width or y + h > screenshot.height:
+                                self.logger.warning(f"Coordinates out of bounds for msg {msg.id}: {x},{y},{w},{h} vs {screenshot.size}")
+                                x = max(0, x)
+                                y = max(0, y)
+                                w = min(w, screenshot.width - x)
+                                h = min(h, screenshot.height - y)
+
+                            cropped = screenshot.crop((x, y, x + w, y + h))
+
+                            try:
+                                if self.pre.is_text_bubble(cropped):
+                                    self.logger.warning(
+                                        f"Rejected image msg {msg.id}: Region looks like a text bubble (structural check)."
+                                    )
+                                    msg.content = "[Invalid Image - Likely Text Bubble]"
+                                    msg.message_type = MessageType.UNKNOWN
+                                    continue
+                            except Exception:
+                                pass
+
+                            if not ImageValidator.is_valid_image_content(cropped):
+                                self.logger.warning(f"Rejected image msg {msg.id}: Content validation failed (likely text bubble).")
+                                msg.content = "[Invalid Image - Likely Text Bubble]"
+                                msg.message_type = MessageType.UNKNOWN
+                                continue
+
+                            # [NEW] 图片去重：基于内容相似度过滤重复图片
+                            if self.deduplicator.is_duplicate(cropped):
+                                self.logger.info(f"Skipped duplicate image msg {msg.id}")
+                                msg.content = "[Duplicate Image]"
+                                continue
+
+                            ts_str = msg.timestamp.strftime('%Y%m%d%H%M%S')
+                            filename = f"{msg.id}_{ts_str}.png"
+                            filepath = os.path.join(images_dir, filename)
+
+                            try:
+                                cropped.save(filepath, format="PNG")
+                                # 注册到去重器
+                                self.deduplicator.add_image(cropped, filepath)
+                                
+                                msg.content = filepath
+                                if msg.message_type == MessageType.UNKNOWN:
+                                    msg.message_type = MessageType.IMAGE
+                                self.logger.info(f"Saved image for msg {msg.id} to {filepath}")
+                            except OSError as e:
+                                import errno
+                                if e.errno == errno.ENOSPC:
+                                    self.logger.critical(f"Disk full! Failed to save image for msg {msg.id}: {e}")
+                                else:
+                                    self.logger.error(f"IO Error saving image for msg {msg.id}: {e}")
+                            except Exception as e:
+                                self.logger.error(f"Failed to save image file for msg {msg.id}: {e}")
+
+                        except Exception as e:
+                            self.logger.error(f"Failed to crop image for msg {msg.id}: {e}")
+                    else:
+                        self.logger.info(f"Skipped small image msg {msg.id}: {w}x{h}")
+                except Exception as e:
+                    self.logger.warning(f"保存图片消息 {msg.id} 失败: {e}")
+                        
+        except Exception as e:
+            self.logger.error(f"批量保存图片消息失败: {e}")
+
     def advanced_scan_chat_history(
         self,
         max_scrolls: int = 100,
@@ -471,6 +620,8 @@ class MainController:
         scroll_interval_range: Optional[tuple] = None,
         max_scrolls_per_minute: Optional[int] = None,
         spm_range: Optional[tuple] = None,
+        on_batch_parsed: Optional[callable] = None,
+        output_dir: Optional[str] = None,
     ) -> List[Message]:
         """
         高级聊天历史扫描 - 使用渐进式滑动和智能终止检测
@@ -486,23 +637,105 @@ class MainController:
             scroll_distance_range: 每次滚动距离范围（像素，形如 (min,max)）
             scroll_interval_range: 渐进式滚动的时间间隔范围（秒，形如 (min,max)）
             max_scrolls_per_minute: 每分钟滚动上限（速率限制）
+            on_batch_parsed: 每批次解析完成后的回调函数，参数为新发现的消息列表
             
         Returns:
             解析得到的消息列表（去重后）
         """
-        from typing import Optional
+        from typing import Optional, Callable
         
         messages: List[Message] = []
         seen_keys = set()
 
+        if output_dir:
+            self._images_output_dir = str(output_dir)
+
+        # 内部函数：处理并去重消息
+        def _process_batch_messages(raw_messages: List[any]) -> List[Message]:
+            new_unique: List[Message] = []
+            for msg in raw_messages:
+                # 转换为标准消息格式并去重
+                if isinstance(msg, dict):
+                    mtype_raw = msg.get('message_type', MessageType.TEXT)
+                    if isinstance(mtype_raw, MessageType):
+                        mtype = mtype_raw
+                    else:
+                        try:
+                            mtype = MessageType(mtype_raw)
+                        except Exception:
+                            mtype = MessageType.TEXT
+
+                    ts_raw = msg.get('timestamp')
+                    if isinstance(ts_raw, datetime):
+                        ts = ts_raw
+                    elif isinstance(ts_raw, str):
+                        try:
+                            ts = datetime.fromisoformat(ts_raw)
+                        except Exception:
+                            ts = datetime.now()
+                    else:
+                        ts = datetime.now()
+
+                    message_obj = Message(
+                        id=msg.get('id') or str(uuid.uuid4()),
+                        sender=msg.get('sender', '未知'),
+                        content=msg.get('content', ''),
+                        message_type=mtype,
+                        timestamp=ts,
+                        confidence_score=float(msg.get('confidence_score', 0.0)),
+                        raw_ocr_text=msg.get('raw_ocr_text', msg.get('content', ''))
+                    )
+                else:
+                    message_obj = msg
+                
+                key = message_obj.stable_key()
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    new_unique.append(message_obj)
+            return new_unique
+
         # 初始化高级滚动控制器（允许 CLI/调用方覆盖滚动参数）
+        def _on_state_callback(state):
+            # 1. 自动保存图片消息
+            if "messages" in state and state["messages"] and state["screenshot"]:
+                self._save_image_messages(state["messages"], state["screenshot"])
+            
+            # 2. 实时处理消息并回调
+            if "messages" in state and state["messages"]:
+                new_msgs = _process_batch_messages(state["messages"])
+                if new_msgs:
+                    messages.extend(new_msgs)
+                    # 触发外部回调（如实时保存）
+                    if on_batch_parsed:
+                        try:
+                            on_batch_parsed(new_msgs)
+                        except Exception as e:
+                            self.logger.warning(f"on_batch_parsed 回调执行失败: {e}")
+                    
+                    # 实时更新进度
+                    if reporter:
+                        reporter.update(
+                            status=f"扫描中: 已处理 {len(messages)} 条消息",
+                            messages_parsed_delta=len(new_msgs)
+                        )
+            
+            # Debug: save full screenshot if needed
+            if state.get("screenshot"):
+                pass
+
         advanced_scroll = AdvancedScrollController(
             scroll_speed=(scroll_speed if scroll_speed is not None else 2),
             scroll_delay=(scroll_delay if scroll_delay is not None else 1.0),
             scroll_distance_range=(scroll_distance_range if scroll_distance_range is not None else (200, 300)),
             scroll_interval_range=(scroll_interval_range if scroll_interval_range is not None else (0.3, 0.5)),
-            inertial_effect=True
+            inertial_effect=True,
+            on_state_captured=_on_state_callback
         )
+        
+        # 注入现有的 OCR 和 Parser 实例，避免重复初始化导致资源浪费或冲突
+        advanced_scroll.ocr = self.ocr
+        advanced_scroll.parser = self.parser
+        
         # 动态速率限制（若提供上限）
         try:
             if max_scrolls_per_minute is not None:
@@ -515,11 +748,6 @@ class MainController:
             pass
 
         # 覆盖坐标场景：跳过窗口定位与激活
-        # 函数级注释：
-        # - 当基础 AutoScrollController（self.scroll）已设置聊天区域覆盖时，
-        #   需要将该覆盖坐标同步到高级滚动控制器 advanced_scroll，
-        #   否则 advanced_scroll 在定位初始位置时会因缺少聊天区域而失败；
-        # - 该同步仅复制 Rectangle 坐标信息，避免依赖窗口 API 的环境阻塞。
         if self.scroll.has_chat_area_override():
             try:
                 rect = self.scroll.get_chat_area_bounds()
@@ -552,84 +780,30 @@ class MainController:
 
         # 执行渐进式滚动扫描
         try:
-            scroll_results = advanced_scroll.progressive_scroll(
+            # 注意：progressive_scroll 是阻塞调用，但它会周期性调用 _on_state_callback
+            # 从而实现上面的实时处理逻辑。
+            _ = advanced_scroll.progressive_scroll(
                 direction=direction,
                 max_scrolls=max_scrolls,
                 target_content=target_content,
                 stop_at_edges=stop_at_edges
             )
 
-            # 处理扫描结果
-            for result in scroll_results:
-                if "messages" in result and result["messages"]:
-                    for msg in result["messages"]:
-                        # 转换为标准消息格式并去重
-                        if isinstance(msg, dict):
-                            # 从字典创建Message对象（统一类型与必填字段）
-                            # 函数级注释：
-                            # - message_type 支持字符串或枚举，统一转换为 MessageType；
-                            # - timestamp 支持 datetime 或 ISO 字符串，默认使用当前时间；
-                            # - id 缺失时自动生成 UUID；
-                            # - confidence_score/raw_ocr_text 缺失时给出合理默认，保证 Message 构造完整。
-                            mtype_raw = msg.get('message_type', MessageType.TEXT)
-                            if isinstance(mtype_raw, MessageType):
-                                mtype = mtype_raw
-                            else:
-                                try:
-                                    mtype = MessageType(mtype_raw)
-                                except Exception:
-                                    mtype = MessageType.TEXT
-
-                            ts_raw = msg.get('timestamp')
-                            if isinstance(ts_raw, datetime):
-                                ts = ts_raw
-                            elif isinstance(ts_raw, str):
-                                try:
-                                    ts = datetime.fromisoformat(ts_raw)
-                                except Exception:
-                                    ts = datetime.now()
-                            else:
-                                ts = datetime.now()
-
-                            message_obj = Message(
-                                id=msg.get('id') or str(uuid.uuid4()),
-                                sender=msg.get('sender', '未知'),
-                                content=msg.get('content', ''),
-                                message_type=mtype,
-                                timestamp=ts,
-                                confidence_score=float(msg.get('confidence_score', 0.0)),
-                                raw_ocr_text=msg.get('raw_ocr_text', msg.get('content', ''))
-                            )
-                        else:
-                            # 假设已经是Message对象
-                            message_obj = msg
-                        
-                        key = message_obj.stable_key()
-                        if key not in seen_keys:
-                            seen_keys.add(key)
-                            messages.append(message_obj)
-
-                # 更新进度
-                if reporter:
-                    reporter.update(
-                        status=f"扫描中: 已处理 {len(messages)} 条消息",
-                        messages_parsed_delta=len(result.get("messages", []))
-                    )
-
             self.logger.info(f"高级扫描完成，共提取 {len(messages)} 条唯一消息")
             
             # Post-process to fill message times
             self._fill_message_times(messages, direction=direction)
-            
-            try:
-                self.last_scroll_stats = advanced_scroll.get_scroll_statistics()
-            except Exception:
-                self.last_scroll_stats = None
 
         except KeyboardInterrupt:
             self.logger.info("用户中断高级扫描")
         except Exception as e:
             self.logger.error(f"高级扫描失败: {e}")
+        finally:
+            # 无论成功或失败（包括中断），都尝试获取统计信息
+            try:
+                self.last_scroll_stats = advanced_scroll.get_scroll_statistics()
+            except Exception:
+                self.last_scroll_stats = None
 
         if reporter:
             reporter.finish(success=bool(messages))
@@ -820,6 +994,10 @@ class MainController:
         cfg_mgr = ConfigManager()
         app_cfg: AppConfig = cfg_mgr.get_config()
         out_cfg: OutputConfig = output_override or app_cfg.output
+        try:
+            self._images_output_dir = str(getattr(out_cfg, "directory", None) or "") or self._images_output_dir
+        except Exception:
+            pass
 
         # Execute extraction only if messages were not provided
         if messages is None:

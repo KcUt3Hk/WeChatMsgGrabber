@@ -192,6 +192,56 @@ def main():
     logger.info("最大滚动次数: %d", args.max_scrolls)
     logger.info("自然滚动参数：距离范围=%s，间隔范围=%s，速率上限=%s/min", distance_range, interval_range, args.max_scrolls_per_minute)
 
+    # 初始化 StorageManager 用于实时保存
+    from services.storage_manager import StorageManager
+    # 构造临时配置用于计算实时路径
+    temp_override = OutputConfig(
+        format=(args.formats.split(',')[0].strip().lower() if args.formats else app_cfg.output.format),
+        directory=(args.output or app_cfg.output.directory),
+        formats=[f.strip().lower() for f in args.formats.split(',') if f.strip()] if args.formats else None
+    )
+    storage_mgr = StorageManager(temp_override)
+
+    # 预计算实时输出文件路径
+    from datetime import datetime
+    from pathlib import Path
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    rt_filename_base = f"{args.filename_prefix}_{ts}"
+    
+    active_formats = temp_override.formats if temp_override.formats else [(temp_override.format or "json").lower()]
+    active_formats = list(set(f.lower() for f in active_formats if f))
+    
+    rt_paths = {}
+    out_dir_path = Path(temp_override.directory)
+    try:
+        out_dir_path.mkdir(parents=True, exist_ok=True)
+        for fmt in active_formats:
+            rt_paths[fmt] = out_dir_path / f"{rt_filename_base}.{fmt}"
+        if rt_paths:
+            logger.info(f"实时输出已启用，文件路径: {[str(p) for p in rt_paths.values()]}")
+    except Exception as e:
+        logger.warning(f"无法创建实时输出目录，将跳过实时保存: {e}")
+
+    def on_batch_parsed(new_msgs):
+        """实时处理回调：过滤并追加写入文件"""
+        if not new_msgs:
+            return
+        
+        # 应用简单的过滤器（如果 CLI 支持的话，目前 auto_wechat_scan.py 主要是全量扫描，暂无复杂过滤参数）
+        # 若 skip-empty 启用，则过滤空消息
+        if args.skip_empty:
+            filtered = [m for m in new_msgs if m.content and m.content.strip()]
+        else:
+            filtered = new_msgs
+        
+        if filtered:
+            for fmt, path in rt_paths.items():
+                try:
+                    storage_mgr.append_messages_to_file(filtered, path, fmt)
+                except Exception as e:
+                    # 仅记录错误，不中断扫描
+                    logger.error(f"实时写入 {fmt} 失败: {e}")
+
     # 执行高级扫描
     # 执行高级扫描（必要时进行一次轻量重试以避免偶发中断）
     messages = []
@@ -219,6 +269,8 @@ def main():
                 scroll_interval_range=interval_range,
                 max_scrolls_per_minute=args.max_scrolls_per_minute,
                 spm_range=spm_range,
+                on_batch_parsed=on_batch_parsed,
+                output_dir=(args.output or app_cfg.output.directory),
             )
             # 合并并去重（基于 stable_key）
             seen = {m.stable_key() for m in messages}
@@ -271,6 +323,18 @@ def main():
                 messages=messages,
                 output_override=override,
             )
+
+            if not messages:
+                logger.warning("扫描完成但未发现任何消息。尝试保存当前屏幕截图以供调试。")
+                try:
+                    from PIL import ImageGrab
+                    import time
+                    debug_shot = ImageGrab.grab()
+                    debug_path = os.path.join(override.directory, f"debug_empty_{int(time.time())}.png")
+                    debug_shot.save(debug_path)
+                    logger.info(f"已保存调试截图至: {debug_path}")
+                except Exception as e:
+                    logger.error(f"保存调试截图失败: {e}")
 
     # 预览前几条结果
     if args.verbose:
@@ -366,4 +430,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logging.basicConfig(level=logging.INFO)
+        logging.getLogger(__name__).info("用户中断扫描。注意：若在此前未看到'扫描中'相关日志，说明扫描尚未正式开始（可能处于 OCR 初始化阶段），因此无内容输出。")
+    except Exception as e:
+        logging.getLogger(__name__).error(f"扫描失败: {e}")
+        sys.exit(1)
