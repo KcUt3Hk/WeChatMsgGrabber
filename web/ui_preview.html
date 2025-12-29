@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WeChatMsgG 性能指标预览</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; margin: 16px; }
+      .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+      .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin-top: 12px; }
+      #metrics_meta { white-space: pre-line; font-size: 14px; color: #333; }
+      #metrics_last_fetch { font-size: 12px; color: #666; }
+      .metric-tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; margin-right: 6px; border: 1px solid #ccc; }
+      .metric-good { background: #e7f7ee; border-color: #7bd6a4; color: #1a7f37; }
+      .metric-warn { background: #fff7e6; border-color: #ffd18a; color: #8a5b00; }
+      .metric-bad { background: #fdecec; border-color: #f1a7a7; color: #b42318; }
+      input, select, button, a { font-size: 14px; }
+      button { padding: 6px 10px; }
+      a { display: inline-block; padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; text-decoration: none; color: #111; background: #fafafa; }
+    </style>
+  </head>
+  <body>
+    <h1>性能指标</h1>
+
+    <div class="row">
+      <button id="btn_metrics_refresh" type="button">刷新指标</button>
+      <button id="btn_metrics_reset" type="button">重置计数（写入快照）</button>
+      <button id="btn_metrics_save_snapshot" type="button">保存当前快照（写入文件）</button>
+      <a id="btn_metrics_download" href="/api/metrics/download" download>下载当前快照</a>
+    </div>
+
+    <div class="card">
+      <div id="metrics_meta">来源：-\nschema：-\n快照时间：-</div>
+      <div id="metrics_last_fetch">上次拉取时间：-</div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <label>good 阈值 <input id="metrics_thr_good" type="text" value="0.70" size="6" /></label>
+        <label>bad 阈值 <input id="metrics_thr_bad" type="text" value="0.30" size="6" /></label>
+        <button id="btn_metrics_save_thresholds" type="button">保存阈值</button>
+        <label>
+          刷新间隔
+          <select id="metrics_refresh_interval">
+            <option value="1000">1000</option>
+            <option value="2000" selected>2000</option>
+            <option value="5000">5000</option>
+          </select>
+        </label>
+        <label><input id="metrics_autorefresh" type="checkbox" /> 自动刷新</label>
+      </div>
+      <div id="metrics_cache_tags" style="margin-top: 10px;"></div>
+    </div>
+
+    <script>
+      const state = {
+        last: null,
+        thrGood: 0.70,
+        thrBad: 0.30,
+        timer: null,
+      };
+
+      function safeNum(x, d = 0) {
+        const n = Number(x);
+        return Number.isFinite(n) ? n : d;
+      }
+
+      function clamp01(x) {
+        if (!Number.isFinite(x)) return 0;
+        if (x < 0) return 0;
+        if (x > 1) return 1;
+        return x;
+      }
+
+      function fmtPct(rate) {
+        const r = clamp01(safeNum(rate, 0));
+        return (r * 100).toFixed(1) + "%";
+      }
+
+      function classify(rate) {
+        const r = clamp01(safeNum(rate, 0));
+        if (r >= state.thrGood) return "metric-good";
+        if (r <= state.thrBad) return "metric-bad";
+        return "metric-warn";
+      }
+
+      function sourceText(source) {
+        if (source === "file") return "文件快照 (metrics.json)";
+        return "内存";
+      }
+
+      function renderTags(metrics) {
+        const container = document.getElementById("metrics_cache_tags");
+        container.innerHTML = "";
+        const caches = (metrics && metrics.cache_stats) || {};
+        const keys = Object.keys(caches);
+        for (const k of keys) {
+          const hitRate = (caches[k] || {}).hit_rate;
+          const span = document.createElement("span");
+          span.className = "metric-tag " + classify(hitRate);
+          span.textContent = fmtPct(hitRate);
+          container.appendChild(span);
+        }
+      }
+
+      function updateMeta(resp) {
+        const meta = document.getElementById("metrics_meta");
+        const ts = resp.timestamp || new Date().toISOString();
+        const schema = String(resp.schema_version ?? "-");
+        const src = sourceText(resp.source);
+        meta.textContent = `来源：${src}\nschema：${schema}\n快照时间：${ts}`;
+      }
+
+      function updateLastFetch() {
+        const el = document.getElementById("metrics_last_fetch");
+        const ts = new Date().toISOString();
+        el.textContent = "上次拉取时间：" + ts;
+      }
+
+      async function fetchMetrics() {
+        const r = await fetch("/api/metrics", { cache: "no-store" });
+        if (!r.ok) throw new Error("metrics fetch failed");
+        const data = await r.json();
+        state.last = data;
+        updateMeta(data);
+        renderTags(data.data || {});
+        updateLastFetch();
+      }
+
+      function readThresholds() {
+        const goodRaw = document.getElementById("metrics_thr_good").value;
+        const badRaw = document.getElementById("metrics_thr_bad").value;
+        state.thrGood = clamp01(parseFloat(String(goodRaw).trim()));
+        state.thrBad = clamp01(parseFloat(String(badRaw).trim()));
+      }
+
+      function setAutoRefresh(enabled) {
+        if (state.timer) {
+          clearInterval(state.timer);
+          state.timer = null;
+        }
+        if (!enabled) return;
+        const ms = Math.max(200, parseInt(document.getElementById("metrics_refresh_interval").value, 10) || 2000);
+        state.timer = setInterval(() => {
+          fetchMetrics().catch(() => {});
+        }, ms);
+      }
+
+      document.getElementById("btn_metrics_refresh").addEventListener("click", () => {
+        fetchMetrics().catch(() => {});
+      });
+
+      document.getElementById("btn_metrics_save_thresholds").addEventListener("click", () => {
+        readThresholds();
+        if (state.last) renderTags(state.last.data || {});
+      });
+
+      document.getElementById("btn_metrics_reset").addEventListener("click", async () => {
+        try {
+          await fetch("/api/metrics/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        } catch (e) {}
+      });
+
+      document.getElementById("btn_metrics_save_snapshot").addEventListener("click", async () => {
+        try {
+          await fetch("/api/metrics/snapshot", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        } catch (e) {}
+      });
+
+      document.getElementById("metrics_autorefresh").addEventListener("change", (e) => {
+        setAutoRefresh(Boolean(e.target.checked));
+      });
+
+      document.getElementById("metrics_refresh_interval").addEventListener("change", () => {
+        const enabled = document.getElementById("metrics_autorefresh").checked;
+        setAutoRefresh(Boolean(enabled));
+      });
+    </script>
+  </body>
+</html>
+

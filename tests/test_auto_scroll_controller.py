@@ -2,11 +2,13 @@
 Tests for auto scroll controller functionality.
 """
 import pytest
+import logging
 from unittest.mock import Mock, patch, MagicMock
 from PIL import Image
 import numpy as np
 
 from services.auto_scroll_controller import AutoScrollController
+import services.auto_scroll_controller as asc
 from models.data_models import WindowInfo, Rectangle
 
 
@@ -47,6 +49,25 @@ class TestAutoScrollController:
         assert result.position.y == 50
         assert result.position.width == 800
         assert result.position.height == 600
+
+    def test_locate_wechat_window_macos_fallback_success_does_not_warn(self, monkeypatch, caplog):
+        """测试 macOS 回退成功时不应输出“未找到窗口”的 warning。"""
+        ctrl = AutoScrollController(enable_macos_fallback=True)
+        monkeypatch.setattr(asc.sys, "platform", "darwin", raising=False)
+        monkeypatch.setattr(asc.gw, "getWindowsWithTitle", lambda _title: [], raising=False)
+
+        dummy = WindowInfo(
+            handle=0,
+            position=Rectangle(x=2, y=31, width=897, height=1344),
+            is_active=True,
+            title="WeChat",
+        )
+        monkeypatch.setattr(ctrl, "_macos_resolve_wechat_window", lambda _patterns: dummy, raising=False)
+
+        caplog.set_level(logging.WARNING)
+        result = ctrl.locate_wechat_window()
+        assert result is not None
+        assert not any("No WeChat window found" in r.message for r in caplog.records)
     
     @patch('pygetwindow.getWindowsWithTitle')
     @pytest.mark.requires_wechat_closed

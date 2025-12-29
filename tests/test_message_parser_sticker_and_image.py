@@ -36,3 +36,28 @@ class TestStickerAndImage:
         msgs = self.parser.parse(regions)
         assert msgs[0].message_type == MessageType.IMAGE
 
+    def test_upstream_sticker_flag_empty_text(self):
+        regions = [
+            TextRegion(
+                text="",
+                bounding_box=Rectangle(120, 160, 140, 140),
+                confidence=0.2,
+                type="sticker",
+            )
+        ]
+        msgs = self.parser.parse(regions)
+        assert len(msgs) == 1
+        assert msgs[0].message_type == MessageType.STICKER
+
+    def test_upstream_image_flag_empty_text(self):
+        regions = [
+            TextRegion(
+                text="",
+                bounding_box=Rectangle(120, 160, 220, 160),
+                confidence=0.2,
+                type="image",
+            )
+        ]
+        msgs = self.parser.parse(regions)
+        assert len(msgs) == 1
+        assert msgs[0].message_type == MessageType.IMAGE

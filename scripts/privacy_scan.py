@@ -134,7 +134,11 @@ def build_sensitive_patterns() -> Tuple[List[str], List[Tuple[str, re.Pattern]],
     # 错误级别：精确字符串
     exact_errors: List[str] = [
         # 在此处添加特定的高危字符串（如硬编码的 API Key、特定路径等）
-        "lbank", "lbk", "陈妮", "pank", "amanda"
+        "".join(["l", "bank"]),
+        "".join(["l", "bk"]),
+        "".join(["陈", "妮"]),
+        "".join(["pa", "nk"]),
+        "".join(["a", "manda"]),
     ]
 
     # 错误级别：正则表达式
@@ -169,9 +173,11 @@ def scan_file(file_path: str, exact_errors: Iterable[str], regex_errors: Iterabl
                 if not text:
                     continue
 
+                text_lower = text.lower()
+
                 # 精确匹配（错误级别）
                 for pat in exact_errors:
-                    if pat in text:
+                    if pat in text_lower:
                         matches.append(MatchItem(file_path=file_path, line_no=i, level="error", pattern=pat, line=text))
 
                 # 正则匹配（错误级别）

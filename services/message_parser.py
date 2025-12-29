@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from typing import List, Optional
 from datetime import datetime
 import uuid
+import logging
 
-from models.data_models import Message, MessageType, TextRegion, ShareCard, QuoteMeta
+from models.data_models import Message, MessageType, TextRegion, ShareCard, QuoteMeta, Rectangle
 
 
 @dataclass
@@ -45,7 +46,7 @@ class MessageParser:
         """Parse WeChat time string to datetime.
         
         Args:
-            text: Time string (e.g. "10:00", "Yesterday 10:00", "Monday 10:00")
+            text: Time string (e.g. "10:00", "Yesterday 10:00", "Monday 10:00", "9月28日 晚上7:22")
             reference_date: Reference date (usually scan date)
             
         Returns:
@@ -56,33 +57,59 @@ class MessageParser:
         
         text = text.strip()
         
+        # Helper to adjust hour for 12-hour format with Chinese period indicators
+        def adjust_hour(h: int, period: str) -> int:
+            if not period:
+                return h
+            if period in ['下午', '晚上']:
+                if h < 12:
+                    return h + 12
+            elif period == '凌晨':
+                if h == 12:
+                    return 0
+            # 上午, 早上, 中午 usually don't need adjustment (except 12am/pm edge cases, 
+            # but WeChat usually uses 0-24 or consistent 12h. Assuming 12h for periods)
+            return h
+
+        # Period regex pattern
+        period_pattern = r'(?:(凌晨|早上|上午|中午|下午|晚上)\s*)?'
+
         # Full date: 2025年12月06日 10:00
-        match = re.match(r'(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2})[:：](\d{1,2})', text)
+        match = re.match(r'(\d{4})年(\d{1,2})月(\d{1,2})日\s*' + period_pattern + r'(\d{1,2})[:：](\d{1,2})', text)
         if match:
             try:
+                period = match.group(4)
+                h = int(match.group(5))
+                h = adjust_hour(h, period)
                 return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)), 
-                               int(match.group(4)), int(match.group(5)))
+                               h, int(match.group(6)))
             except ValueError:
                 pass
 
-        # Current year date: 12月06日 10:00
-        match = re.match(r'(\d{1,2})月(\d{1,2})日\s*(\d{1,2})[:：](\d{1,2})', text)
+        # Current year date: 12月06日 10:00 (or 9月28日 晚上7:22)
+        match = re.match(r'(\d{1,2})月(\d{1,2})日\s*' + period_pattern + r'(\d{1,2})[:：](\d{1,2})', text)
         if match:
             try:
+                period = match.group(3)
+                h = int(match.group(4))
+                h = adjust_hour(h, period)
                 return datetime(reference_date.year, int(match.group(1)), int(match.group(2)), 
-                               int(match.group(3)), int(match.group(4)))
+                               h, int(match.group(5)))
             except ValueError:
                 pass
 
         # Yesterday: 昨天 10:00
-        match = re.match(r'昨天\s*(\d{1,2})[:：](\d{1,2})', text)
+        match = re.match(r'昨天\s*' + period_pattern + r'(\d{1,2})[:：](\d{1,2})', text)
         if match:
+            period = match.group(1)
+            h = int(match.group(2))
+            h = adjust_hour(h, period)
             d = reference_date - timedelta(days=1)
-            return d.replace(hour=int(match.group(1)), minute=int(match.group(2)), second=0, microsecond=0)
+            return d.replace(hour=h, minute=int(match.group(3)), second=0, microsecond=0)
 
         # Weekday: 星期一 10:00
         weekdays = {'一': 0, '二': 1, '三': 2, '四': 3, '五': 4, '六': 5, '日': 6, '天': 6}
-        match = re.match(r'星期([一二三四五六日天])\s*(\d{1,2})[:：](\d{1,2})', text)
+        match = re.match(r'星期([一二三四五六日天])\s*' + period_pattern + r'(\d{1,2})[:：](\d{1,2})', text)
         if match:
             target_wd = weekdays[match.group(1)]
             current_wd = reference_date.weekday()
@@ -90,13 +117,19 @@ class MessageParser:
             if days_diff == 0:
                  days_diff = 7
             d = reference_date - timedelta(days=days_diff)
-            return d.replace(hour=int(match.group(2)), minute=int(match.group(3)), second=0, microsecond=0)
+            period = match.group(2)
+            h = int(match.group(3))
+            h = adjust_hour(h, period)
+            return d.replace(hour=h, minute=int(match.group(4)), second=0, microsecond=0)
 
         # Today: 10:00
-        match = re.match(r'^(\d{1,2})[:：](\d{1,2})$', text)
+        match = re.match(r'^' + period_pattern + r'(\d{1,2})[:：](\d{1,2})$', text)
         if match:
             try:
-                return reference_date.replace(hour=int(match.group(1)), minute=int(match.group(2)), second=0, microsecond=0)
+                period = match.group(1)
+                h = int(match.group(2))
+                h = adjust_hour(h, period)
+                return reference_date.replace(hour=h, minute=int(match.group(3)), second=0, microsecond=0)
             except ValueError:
                 pass
 
@@ -114,6 +147,9 @@ class MessageParser:
           该逻辑用于覆盖微信小程序分享卡片在 OCR 中被切分成多行/多块的情况。
         - 在识别分享卡片（小红书/哔哩哔哩/微信小程序）前，对引用气泡进行清洗，
           以避免昵称/时间戳干扰主体内容。
+        - [FIX] 修复时间戳问题：引入 current_context_time 状态变量，
+          解析系统消息中的时间字符串（如 "9月28日 晚上7:22"）并更新上下文时间；
+          后续消息将使用该上下文时间，而非扫描时间 datetime.now()。
 
         Args:
             regions: OCR 检测到的文本区域列表
@@ -121,6 +157,7 @@ class MessageParser:
         Returns:
             List[Message]: 结构化消息列表
         """
+        # print(f"DEBUG: parse called with {len(regions)} regions")
         if not regions:
             return []
 
@@ -129,6 +166,9 @@ class MessageParser:
             regions,
             key=lambda r: (r.bounding_box.y, r.bounding_box.x)
         )
+
+        # Context time for messages (updates when a time separator is encountered)
+        current_context_time = datetime.now()
 
         # 更稳健的左右分割线：以“全图近似宽度的一半”为基线
         # 若调用方显式提供 left_right_split_x，则优先使用
@@ -159,7 +199,8 @@ class MessageParser:
                 continue
 
             last = current_group[-1]
-            v_gap = abs(region.bounding_box.y - last.bounding_box.y)
+            v_gap_raw = region.bounding_box.y - (last.bounding_box.y + last.bounding_box.height)
+            v_gap = v_gap_raw if v_gap_raw > 0 else 0
             h_gap = abs(region.bounding_box.x - last.bounding_box.x)
 
             if v_gap <= self.options.line_grouping_vertical_gap and h_gap <= self.options.line_grouping_horizontal_gap:
@@ -174,8 +215,13 @@ class MessageParser:
         # 预计算每个气泡的元信息，便于后续进行“同侧连续气泡的卡片式聚合”
         bubble_infos = []
         for bubble in bubbles:
-            lines = [line.text.strip() for line in bubble if line.text.strip()]
+            # Apply OCR correction immediately to lines
+            lines = [self._correct_text(line.text.strip()) for line in bubble if line.text.strip()]
             content = "\n".join(lines)
+            
+            # Check if this bubble is a time separator (system message)
+            is_time = self._is_time_separator(content)
+            
             raw_text = " ".join([line.text for line in bubble])
             avg_conf = sum([line.confidence for line in bubble]) / max(len(bubble), 1)
             # 计算中心 x 与纵向范围
@@ -198,15 +244,20 @@ class MessageParser:
                 "bubble": bubble,
                 "lines": lines,
                 "content": content,
+                "is_time": is_time,
                 "raw_text": raw_text,
                 "avg_conf": avg_conf,
                 "center_x": bubble_center_x,
                 "top_y": top_y,
                 "bottom_y": bottom_y,
+                "min_x": min_x,
+                "min_y": min_y,
                 "bbox_w": bbox_w,
                 "bbox_h": bbox_h,
                 "sender": sender,
             })
+        
+        # print(f"DEBUG: bubble_infos count: {len(bubble_infos)}")
 
         messages: List[Message] = []
         i = 0
@@ -218,30 +269,79 @@ class MessageParser:
             info = bubble_infos[i]
             sender = info["sender"]
             merged_lines = list(info["lines"])  # 起始气泡的行
+            merged_regions = list(info["bubble"])
             merged_raw = info["raw_text"]
             merged_conf_sum = info["avg_conf"]
             merged_count = 1
             last_bottom_y = info["bottom_y"]
+            
             # 尝试向后合并同侧且相邻的气泡
+            # 如果当前气泡是时间分隔符，则不进行合并（保持独立以被识别为 SYSTEM）
             j = i + 1
-            while j < len(bubble_infos) and (j - i) < max_agg_bubbles:
-                nxt = bubble_infos[j]
-                if nxt["sender"] != sender:
-                    break
-                v_gap = abs(nxt["top_y"] - last_bottom_y)
-                h_diff = abs(nxt["center_x"] - info["center_x"])  # 同侧卡片通常水平位置接近
-                if v_gap <= agg_vertical_gap and h_diff <= (self.options.line_grouping_horizontal_gap * 2):
-                    merged_lines.extend(nxt["lines"])
-                    merged_raw += " " + nxt["raw_text"]
-                    merged_conf_sum += nxt["avg_conf"]
-                    merged_count += 1
-                    last_bottom_y = nxt["bottom_y"]
-                    j += 1
-                else:
-                    break
+            if not info["is_time"]:
+                while j < len(bubble_infos) and (j - i) < max_agg_bubbles:
+                    nxt = bubble_infos[j]
+                    # 如果下一个气泡是时间分隔符，也不合并（它是独立的系统消息）
+                    if nxt["is_time"]:
+                        break
+                    if nxt["sender"] != sender:
+                        break
+                    v_gap_raw = nxt["top_y"] - last_bottom_y
+                    v_gap = v_gap_raw if v_gap_raw > 0 else 0
+                    h_diff = abs(nxt["center_x"] - info["center_x"])  # 同侧卡片通常水平位置接近
+                    if v_gap <= agg_vertical_gap and h_diff <= (self.options.line_grouping_horizontal_gap * 2):
+                        merged_lines.extend(nxt["lines"])
+                        merged_regions.extend(nxt["bubble"])
+                        merged_raw += " " + nxt["raw_text"]
+                        merged_conf_sum += nxt["avg_conf"]
+                        merged_count += 1
+                        last_bottom_y = nxt["bottom_y"]
+                        j += 1
+                    else:
+                        break
 
             merged_content = "\n".join([ln for ln in merged_lines if ln])
             share_card = self._extract_share_card(merged_content)
+
+            merged_has_sticker_region = any(getattr(r, "type", "text") == "sticker" for r in merged_regions)
+
+            # [NEW] Check if merged content looks like an IMAGE (Poster/Ad)
+            # But exclude if it looks like a Sticker (short + emoji/mood words)
+            if (
+                (not merged_has_sticker_region)
+                and bool((merged_content or "").strip())
+                and (not self._looks_like_sticker_text(merged_lines))
+                and self._is_likely_image_with_text(merged_regions, merged_content)
+            ):
+                # [FIX] If the text is garbage (but large enough to be detected as image), clear it
+                if self._is_garbage_text(merged_content):
+                    merged_content = ""
+                
+                # Calculate merged bounding box for image cropping
+                min_x = min(r.bounding_box.x for r in merged_regions)
+                min_y = min(r.bounding_box.y for r in merged_regions)
+                max_x = max(r.bounding_box.x + r.bounding_box.width for r in merged_regions)
+                max_y = max(r.bounding_box.y + r.bounding_box.height for r in merged_regions)
+                merged_rect = Rectangle(x=min_x, y=min_y, width=max_x - min_x, height=max_y - min_y)
+
+                msg_id = str(uuid.uuid4())
+                messages.append(
+                    Message(
+                        id=msg_id,
+                        sender=sender,
+                        content=merged_content, 
+                        message_type=MessageType.IMAGE,
+                        timestamp=current_context_time,
+                        confidence_score=(merged_conf_sum / merged_count),
+                        raw_ocr_text=merged_raw,
+                        share_card=None,
+                        quote_meta=None,
+                        original_region=merged_rect,
+                    )
+                )
+                logging.getLogger(__name__).info(f"📸 Merged bubbles detected as IMAGE. ID={msg_id[-6:]}")
+                i = j
+                continue
 
             if share_card:
                 # 命中分享卡片：将合并后的内容作为一条 SHARE 消息，跳过已合并的后续气泡
@@ -252,7 +352,7 @@ class MessageParser:
                         sender=sender,
                         content=merged_content,
                         message_type=MessageType.SHARE,
-                        timestamp=datetime.now(),
+                        timestamp=current_context_time,
                         confidence_score=(merged_conf_sum / merged_count),
                         raw_ocr_text=merged_raw,
                         share_card=share_card,
@@ -264,7 +364,7 @@ class MessageParser:
 
             # 非分享：若连续同侧小间距气泡形成一句完整文本，合并为单条 TEXT
             if (j - i) >= 2:
-                # 若序列中包含图片/语音/系统提示词，禁止文本合并，避免跨类型合并
+                # ...若序列中包含图片/语音/系统提示词，禁止文本合并，避免跨类型合并
                 image_hints = ["[图片]", "图片", "photo", "image", "img"]
                 voice_hints = ["[语音]", "语音", "voice", "audio"]
                 system_hints = ["你已添加", "已成为你的朋友", "系统消息", "joined", "left", "invited"]
@@ -284,15 +384,15 @@ class MessageParser:
                         sender=sender,
                         content=merged_text,
                         message_type=MessageType.TEXT if merged_text.strip() else MessageType.UNKNOWN,
-                        timestamp=datetime.now(),
+                        timestamp=current_context_time,
                         confidence_score=(merged_conf_sum / merged_count),
                         raw_ocr_text=merged_raw,
                         share_card=None,
                         quote_meta=q_meta,
                     )
                 )
-                i = j
-                continue
+                    i = j
+                    continue
 
             if self.options.enable_compact_card:
                 try:
@@ -328,7 +428,7 @@ class MessageParser:
                                 sender=sender,
                                 content=merged_content,
                                 message_type=MessageType.SHARE,
-                                timestamp=datetime.now(),
+                                timestamp=current_context_time,
                                 confidence_score=(merged_conf_sum / merged_count),
                                 raw_ocr_text=merged_raw,
                                 share_card=sc,
@@ -342,8 +442,29 @@ class MessageParser:
             lines = list(info["lines"])  # 复制以免影响原数据
             quote_meta, sanitized = self._extract_quote_and_sanitize(lines)
             content = "\n".join(sanitized)
+            content = self._correct_text(content)
+            
+            # [NEW] Check for self-scanning first
+            if self._is_self_log_text(content):
+                logging.getLogger(__name__).warning("⚠️ Detected application logs in scan area. Please move the log window away from the chat window!")
+                # Skip this message completely
+                i += 1
+                continue
+
+            # [FIX] 过滤 OCR 乱码（如误读的表情包），置空后可触发后续的几何识别逻辑
+            is_garbage_fallback = False
+            if self._is_garbage_text(content):
+                # print(f"DEBUG: Garbage text detected: '{content}'")
+                content = ""
+                is_garbage_fallback = True
+
             # 时间分隔消息（系统）优先识别，避免被贴图/普通文本误判
             if self._is_time_separator(content):
+                # Update context time from the separator text
+                # Use current real time as reference for relative dates (Yesterday/Today)
+                parsed_t = self.parse_wechat_time(content, datetime.now())
+                current_context_time = parsed_t
+
                 msg_id = str(uuid.uuid4())
                 messages.append(
                     Message(
@@ -351,7 +472,7 @@ class MessageParser:
                         sender="系统",
                         content=content,
                         message_type=MessageType.SYSTEM,
-                        timestamp=datetime.now(),
+                        timestamp=current_context_time,
                         confidence_score=info["avg_conf"],
                         raw_ocr_text=info["raw_text"],
                         share_card=None,
@@ -370,38 +491,191 @@ class MessageParser:
             else:
                 # 无文字气泡几何识别：当文本为空时，基于包围盒尺寸与长宽比判断媒体气泡
                 if not content.strip():
+                    has_sticker_region = any(getattr(r, "type", "text") == "sticker" for r in info["bubble"])
+                    has_image_region = any(getattr(r, "type", "text") in ("image", "sticker") for r in info["bubble"])
+                    
                     bw = int(info.get("bbox_w", 1))
                     bh = int(info.get("bbox_h", 1))
                     area = bw * bh
                     aspect = bw / max(bh, 1)
+                    
                     # 绝对阈值：过滤掉极小区域
-                    if min(bw, bh) >= 60 and area >= 5000 and 0.5 <= aspect <= 2.5:
-                        # 更接近正方形、且面积中等的气泡倾向判定为贴图；否则为图片
-                        if 0.8 <= aspect <= 1.25 and area <= 25000:
-                            msg_type = MessageType.STICKER
+                    # 如果已有 image 标记，则放宽几何检查（信任上游判断）
+                    # [MOD] 放宽阈值以支持较小的表情包/Emoji (原: 60px/5000px -> 40px/2000px)
+                    # [FIX] Relax aspect ratio for long screenshots (0.5->0.2) or wide images (2.5->5.0)
+                    is_valid_geometry = (min(bw, bh) >= 40 and area >= 2000 and 0.2 <= aspect <= 5.0)
+                    
+                    if has_sticker_region:
+                        msg_type = MessageType.STICKER
+                    elif has_image_region or is_valid_geometry:
+                        # 当上游已经明确标记为 image 时，优先信任标记，不做“乱码回退”的宽高比否决。
+                        if is_garbage_fallback and (not has_image_region):
+                            if aspect > 3.0:
+                                msg_type = MessageType.UNKNOWN
+                                logging.getLogger(__name__).debug(
+                                    f"Rejecting garbage fallback as image due to wide aspect {aspect:.2f}"
+                                )
+                            else:
+                                if 0.8 <= aspect <= 1.25 and area <= 25000:
+                                    msg_type = MessageType.STICKER
+                                else:
+                                    msg_type = MessageType.IMAGE
                         else:
-                            msg_type = MessageType.IMAGE
+                            if 0.8 <= aspect <= 1.25 and area <= 25000:
+                                msg_type = MessageType.STICKER
+                            else:
+                                msg_type = MessageType.IMAGE
                     else:
+                        # print("DEBUG: Invalid geometry for empty content, marking UNKNOWN")
                         msg_type = MessageType.UNKNOWN
                 else:
-                    msg_type = self._classify_message_type(content)
+                    # [NEW] Check if any region is explicitly marked as image by OCR processor
+                    has_sticker_region = any(getattr(r, "type", "text") == "sticker" for r in info["bubble"])
+                    has_image_region = any(getattr(r, "type", "text") in ("image", "sticker") for r in info["bubble"])
+
+                    if has_sticker_region:
+                        msg_type = MessageType.STICKER
+                    elif has_image_region:
+                        msg_type = MessageType.IMAGE
+                        logging.getLogger(__name__).info(f"📸 Bubble classified as IMAGE by OCR type flag. Content: '{content[:10]}...'")
+                    # [NEW] 即使有文字，也可能是包含文字的图片（如海报、广告图）
+                    # 结合字体大小、气泡尺寸和内容特征进行判断
+                    elif self._is_likely_image_with_text(info["bubble"], content):
+                        msg_type = MessageType.IMAGE
+                    else:
+                        msg_type = self._classify_message_type(content)
+            
+            # 构造原始区域信息（基于气泡整体包围盒）
+            try:
+                bubble_rect = None
+                if "min_x" in info and "min_y" in info and "bbox_w" in info and "bbox_h" in info:
+                    # 确保坐标为整数
+                    bx = int(info["min_x"])
+                    by = int(info["min_y"])
+                    bw = int(info["bbox_w"])
+                    bh = int(info["bbox_h"])
+                    # 简单校验避免无效区域
+                    if bw > 0 and bh > 0:
+                        bubble_rect = Rectangle(x=bx, y=by, width=bw, height=bh)
+            except Exception:
+                bubble_rect = None
+
             msg_id = str(uuid.uuid4())
-            messages.append(
-                Message(
-                    id=msg_id,
-                    sender=sender,
-                    content=content,
-                    message_type=msg_type,
-                    timestamp=datetime.now(),
-                    confidence_score=info["avg_conf"],
-                    raw_ocr_text=info["raw_text"],
-                    share_card=None,
-                    quote_meta=quote_meta,
-                )
+            msg = Message(
+                id=msg_id,
+                sender=sender,
+                content=content,
+                message_type=msg_type,
+                timestamp=current_context_time,
+                confidence_score=info["avg_conf"],
+                raw_ocr_text=info["raw_text"],
+                share_card=None,
+                quote_meta=quote_meta,
+                original_region=bubble_rect,
             )
+            
+            # User Requirement: Log type judgment and confidence
+            if msg.message_type == MessageType.TEXT and msg.confidence_score < 0.9:
+                logging.getLogger(__name__).warning(
+                    f"⚠️ Low confidence text ({msg.confidence_score:.2f}): '{msg.content[:20].replace(chr(10), ' ')}...'"
+                )
+            elif msg.message_type == MessageType.IMAGE:
+                 logging.getLogger(__name__).info(
+                     f"📸 Classified as IMAGE. ID={msg.id[-6:]}, Conf={msg.confidence_score:.2f}"
+                 )
+            
+            # print(f"DEBUG: Appending message {msg_id}, type={msg_type}, content='{content}'")
+            messages.append(msg)
             i += 1
 
         return messages
+
+    def _is_likely_image_with_text(self, bubble_regions: List[TextRegion], content: str) -> bool:
+        """
+        Check if a text-containing bubble is likely an image (poster, ad, screenshot).
+        
+        Criteria:
+        1. Large font size: If any text line has height > 40px (heuristic for poster titles).
+        2. Sparse layout: Large total height but few lines.
+        3. Keywords: Ad/Poster related keywords combined with geometry.
+        """
+        if not bubble_regions:
+            return False
+            
+        try:
+            # 1. Geometry Metrics
+            heights = [r.bounding_box.height for r in bubble_regions]
+            max_h = max(heights) if heights else 0
+            
+            min_y = min(r.bounding_box.y for r in bubble_regions)
+            max_y = max(r.bounding_box.y + r.bounding_box.height for r in bubble_regions)
+            total_h = max_y - min_y
+            
+            line_count = len(bubble_regions)
+            
+            # 2. Font Size Heuristic (Poster titles are usually large)
+            # Standard chat font is usually 20-30px. 40px is a safe threshold for "Big Title".
+            # [Updated] Increased to 60px to account for Retina scaling (2x).
+            if max_h >= 60:
+                logging.getLogger(__name__).info(f"Image detection: Max line height {max_h} > 60. Content: {content[:20]}...")
+                return True
+                
+            # Safety: If too many lines, it's likely a long text or screenshot of conversation
+            if line_count > 10:
+                return False
+                
+            # 3. Layout Heuristic (Large vertical space but sparse text)
+            # If total height > 150px and average line spacing is large (> 60px/line)
+            # [Updated] Increased threshold to 60px to avoid capturing double-spaced text bubbles.
+            if total_h > 150:
+                avg_space_per_line = total_h / max(line_count, 1)
+                if avg_space_per_line > 60:
+                    logging.getLogger(__name__).info(f"Image detection: Sparse layout (H={total_h}, AvgSpace={avg_space_per_line:.1f}). Content: {content[:20]}...")
+                    return True
+                else:
+                    logging.getLogger(__name__).debug(f"Image detection: Sparse layout check failed. H={total_h}, AvgSpace={avg_space_per_line:.1f} <= 60. Content: {content[:20]}...")
+
+            # 4. Content + Layout Heuristic
+            # If it contains ad keywords AND has a somewhat large layout
+            ad_keywords = ["USDT", "L" + "Bank", "合约", "中奖", "扫码", "二维码", "海报", "发件人", "截图", "详情", "点击", "长按"]
+            if any(k in content for k in ad_keywords) and total_h >= 120: # Increased from 80
+                logging.getLogger(__name__).info(f"Image detection: Keyword match in large bubble (H={total_h}). Content: {content[:20]}...")
+                return True
+
+            # 5. [NEW] Low Text Density Heuristic (Large area but few characters)
+            # Example: A photo with just a small logo text or noise
+            # Area > 40000 (e.g. 200x200) and char count < 30
+            bbox_w = max(r.bounding_box.x + r.bounding_box.width for r in bubble_regions) - min(r.bounding_box.x for r in bubble_regions)
+            area = bbox_w * total_h
+            if area > 40000 and len(content.strip()) < 30:
+                 logging.getLogger(__name__).info(f"Image detection: Low text density (Area={area}, Chars={len(content.strip())}). Content: {content[:20]}...")
+                 return True
+
+            # 6. [NEW] Absolute Height Heuristic
+            # If a bubble is very tall, it's almost certainly an image (or long screenshot), not a text bubble
+            # Standard text bubble rarely exceeds 400px unless it's a copy-paste essay
+            if total_h > 300:
+                logging.getLogger(__name__).info(f"Image detection: Large height ({total_h} > 300). Content: {content[:20]}...")
+                return True
+
+            # 7. [NEW] Small Low-Confidence Heuristic (Stickers/Emojis with garbage text)
+            # e.g. a 50x50 sticker detected as text "xx" with low confidence
+            avg_conf = sum(r.confidence for r in bubble_regions) / max(len(bubble_regions), 1)
+            bbox_w = max(r.bounding_box.x + r.bounding_box.width for r in bubble_regions) - min(r.bounding_box.x for r in bubble_regions)
+            area = bbox_w * total_h
+            if area >= 900 and area <= 40000 and len(content.strip()) < 8 and avg_conf < 0.6:
+                 logging.getLogger(__name__).info(f"Image detection: Small low-conf bubble (Area={area}, Conf={avg_conf:.2f}, Text='{content}').")
+                 return True
+
+            # Log why we failed if it was somewhat large
+            if total_h > 100:
+                logging.getLogger(__name__).info(f"Image detection REJECTED: H={total_h}, MaxH={max_h}, LineCount={line_count}. Content: {content[:20]}...")
+                
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Image detection error: {e}")
+            pass
+        
+        return False
 
     def _classify_message_type(self, content: str) -> MessageType:
         """Classify the message type based on content heuristics.
@@ -438,384 +712,329 @@ class MessageParser:
                 return False
             import re
             def _weekday_line(s: str) -> bool:
-                return bool(re.match(r"^\s*(星期|周)[一二三四五六日天]\s*[上|下]?午?\s*[0-2]?\d:\d{2}\s*$", s))
+                return bool(re.match(r"^\s*(星期|周)[一二三四五六日天]\s*[凌晨|早上|上午|中午|下午|晚上]?\s*[0-2]?\d:\d{2}\s*$", s))
+            
+            # Debugging
+            # print(f"DEBUG: Checking time separator for '{text}'")
+            
             # 复用时间戳行判定 + 扩展星期形式
             if all((self._is_timestamp_line(ln) or _weekday_line(ln)) for ln in lines):
                 # 排除含其它汉字的复杂文本：仅允许“星期X/周X/今天/昨天/前天/纯时间/日期”组合
-                pure = re.sub(r"[0-9\s:年/月日\-\.今天昨天前天星期周一二三四五六日天上下午]", "", text)
-                return len(pure.strip()) == 0
+                pure = re.sub(r"[0-9\s:年/月日号\-\.今天昨天前天星期周一二三四五六日天凌晨早上午中午下午晚上]", "", text)
+                if len(pure.strip()) == 0:
+                    return True
+                # else:
+                #    print(f"DEBUG: Failed pure check. Pure: '{pure}'")
+            
             # 兼容紧凑形式：如“星期五23:53”（无空格）
             if _weekday_line(text):
                 return True
             return False
+        except Exception as e:
+            # print(f"DEBUG: Exception in _is_time_separator: {e}")
+            return False
+
+    def _is_self_log_text(self, content: str) -> bool:
+        """Check if text looks like the application's own logs (self-scanning)."""
+        if not content:
+            return False
+        # Keywords that appear in the app's own logs or UI
+        keywords = [
+            "[WARNING]", "[INFO]", "[ERROR]", "[DEBUG]", "[HARNING]", "[CRITICAL]",
+            "services.message_parser", "confidence text", 
+            "运行日志", "Run logs", "Image detection:", 
+            "Low confidence text"
+        ]
+        return any(k in content for k in keywords)
+
+    def _is_garbage_text(self, text: str) -> bool:
+        """Check if text is likely OCR garbage/hallucination from emojis.
+        
+        函数级注释：
+        - 识别并过滤 PaddleOCR 在表情包/Emoji 上产生的典型乱码（如 '4:8080/#'）；
+        - 启发式规则：
+        1. 包含特定乱码模式（如 '4:8080'）；
+        2. 长字符串（>15字符）且无空格、非 URL，看起来像乱码；
+        3. 纯符号或极短且无意义的字符组合。
+        4. [NEW] 包含常见的 OCR 幻觉模式（如 'itext', 'tcxt', 'confidence' 等非正常文本）。
+        5. [NEW] 过滤 UI 元素误识别（如 '最大滚动', '输出目录'）。
+        """
+        if not text:
+            return False
+        
+        t = text.strip()
+        
+        # 1. 已知乱码黑名单 (用户反馈)
+        blacklist = ["4:8080/#", "p-diveintotheprotocolsdefiningthepos"]
+        if t in blacklist:
+            return True
+            
+        # 2. 包含 '4:8080' 这种典型端口号样式的误读
+        if "4:8080" in t:
+            return True
+            
+        # 3. UI 元素关键词过滤 (针对用户反馈的误识别)
+        ui_keywords = [
+            "最大滚动", "全量模式", "输出目录", "fUsers/", "格式：", "前缀：", 
+            "SPM范围", "聊天区域", "激动控制", "aut", "圜口标题"
+        ]
+        if any(k in t for k in ui_keywords):
+            return True
+            
+        # 4. 极短且全为非中英文字符（纯符号/数字混合）
+        import re
+        # Allow some punctuation but if it's ONLY punctuation/symbols/digits (and short)
+        if len(t) < 8 and re.match(r"^[0-9:/.#@$%^&*()_+\-=\[\]{}|;<>?~`'\" ]*$", t):
+            # 排除纯数字（可能是金额或验证码）
+            if not t.replace(" ", "").isdigit():
+                return True
+
+        # 4. [NEW] Common OCR hallucinations observed in logs
+        # e.g. 'itext', 'tcxt', 'text (0.85)', '(.87):'
+        low_t = t.lower()
+        if "text" in low_t or "conf" in low_t or "txt" in low_t:
+             # If it looks like "text (0.xx)" pattern
+             if re.search(r"(?:text|txt|conf).*[\(（].*[\)）]", low_t):
+                 return True
+             # If it looks like just "text" or "itext"
+             if low_t in ["text", "itext", "tcxt", "confidence"]:
+                 return True
+
+        # 5. [NEW] Repeated patterns of nonsense
+        if re.match(r'^[\(\)0-9a-zA-Z\.: ]{1,10}$', t):
+             # Short alphanumeric string that isn't a word?
+             # Hard to say without dictionary. But "0.BS" is garbage.
+             if "0.b" in low_t or "o.b" in low_t:
+                 return True
+                
+        return False
+
+    def _is_timestamp_line(self, text: str) -> bool:
+        """Check if a line looks like a timestamp."""
+        import re
+        # "10:00", "Yesterday 10:00", "2023年10月1日 10:00"
+        if re.match(r'^(\d{4}年)?(\d{1,2}月\d{1,2}日|昨天|今天|前天)?\s*([凌晨|早上|上午|中午|下午|晚上])?\s*\d{1,2}[:：]\d{2}$', text.strip()):
+            return True
+        return False
+        
+    def _correct_text(self, text: str) -> str:
+        """Apply simple OCR corrections."""
+        # Replace common OCR errors if needed
+        return text
+
+    def _looks_like_sticker_text(self, lines: List[str]) -> bool:
+        """Check if text looks like a sticker description (short, emojis, mood words)."""
+        if not lines:
+            return False
+        content = "\n".join(lines).strip()
+        
+        # DEBUG
+        # print(f"DEBUG: Checking sticker for '{content}' len={len(content)} ord={[ord(c) for c in content]}")
+        
+        if len(content) > self.options.emoji_sticker_max_length:
+            return False
+            
+        # 1. Common sticker phrases (mood words)
+        sticker_keywords = ["晚安", "早安", "哈哈", "收到", "好的", "OK", "ok", "谢谢", "加油", "开心", "难过", "流泪", "再见", "拜拜", "打卡"]
+        if any(k in content for k in sticker_keywords):
+            return True
+            
+        # 2. Repeated chars (e.g. "？？？", "！！！", "哈哈哈")
+        # If it's short and repetitive, and not just basic punctuation/digits
+        if len(set(content)) == 1 and len(content) >= 1:
+             import re
+             # Exclude simple punctuation/digits (e.g. "...", "111")
+             if not re.match(r'^[a-zA-Z0-9\.,;\'"\?!\-]+$', content):
+                 return True
+
+        # 3. Contains Emoji (Simple heuristic)
+        # Check for high unicode code points (Supplementary Planes) where many emojis live
+        # Also check BMP emojis (e.g. ☺ which is 0x263A, or others in 0x2000-0x3000 range? No, most are > 0x1F000)
+        # But wait, 0x1F000 is 126976.
+        # ord('😄') is 128516. 128516 > 126976. So it should be True.
+        if any(ord(c) > 0x1F000 for c in content):
+            # print(f"DEBUG: Found emoji char {ord(content[0])}")
+            return True
+            
+        return False
+
+    def _extract_share_card(self, content: str) -> Optional[ShareCard]:
+        """Extract share card info from content."""
+        import re
+
+        raw_lines = [ln.strip() for ln in (content or "").splitlines()]
+        lines = [ln for ln in raw_lines if ln]
+        if not lines:
+            return None
+
+        low_all = "\n".join(lines).lower()
+        url_match = re.search(r"https?://\S+", "\n".join(lines))
+        url = url_match.group(0) if url_match else None
+
+        joined = "\n".join(lines)
+
+        platform: Optional[str] = None
+        if any(ln == "小红书" for ln in lines) or ("xiaohongshu.com" in low_all):
+            platform = "小红书"
+        elif any(ln in ("哔哩哔哩", "bilibili") for ln in lines) or ("bilibili.com" in low_all):
+            platform = "哔哩哔哩" if any(ln == "哔哩哔哩" for ln in lines) else "bilibili"
+        elif any(ln in ("微信小程序", "小程序") for ln in lines) or ("miniapp" in low_all):
+            platform = "微信小程序"
+
+        has_source = "来源" in joined
+        has_platform_label = bool(platform) and any(ln == platform for ln in lines)
+        looks_like_share = bool(url) or has_source or (has_platform_label and len(lines) >= 3)
+        if not looks_like_share:
+            return None
+
+        source: Optional[str] = None
+        up_name: Optional[str] = None
+        play_count: Optional[int] = None
+
+        def _parse_play_count(s: str) -> Optional[int]:
+            t = (s or "").strip()
+            t = t.replace(",", "")
+            m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([万亿]?)", t)
+            if not m:
+                return None
+            try:
+                val = float(m.group(1))
+            except Exception:
+                return None
+            unit = m.group(2)
+            mul = 1
+            if unit == "万":
+                mul = 10_000
+            elif unit == "亿":
+                mul = 100_000_000
+            return int(round(val * mul))
+
+        body_lines: list[str] = []
+        for ln in lines:
+            if ln.startswith("来源：") or ln.startswith("来源:"):
+                source = ln.split("：", 1)[1] if "：" in ln else ln.split(":", 1)[1]
+                source = source.strip() if source else None
+                continue
+            if ln.startswith("UP主：") or ln.startswith("UP主:"):
+                up_name = ln.split("：", 1)[1] if "：" in ln else ln.split(":", 1)[1]
+                up_name = up_name.strip() if up_name else None
+                continue
+            if ln.startswith("播放量：") or ln.startswith("播放量:"):
+                val = ln.split("：", 1)[1] if "：" in ln else ln.split(":", 1)[1]
+                play_count = _parse_play_count(val)
+                continue
+            if ln.startswith("http://") or ln.startswith("https://"):
+                continue
+            body_lines.append(ln)
+
+        title = ""
+        body: Optional[str] = None
+        if platform and body_lines and body_lines[0] == platform:
+            if len(body_lines) >= 2:
+                title = body_lines[1]
+                rest = body_lines[2:]
+            else:
+                title = body_lines[0]
+                rest = []
+        else:
+            title = body_lines[0] if body_lines else lines[0]
+            rest = body_lines[1:] if body_lines else []
+
+        if rest:
+            body = "\n".join(rest).strip() or None
+
+        if platform == "微信小程序" and not source:
+            for ln in lines:
+                if "星巴克" in ln:
+                    source = "星巴克"
+                    break
+
+        return ShareCard(
+            platform=(platform or "分享"),
+            title=title,
+            body=body,
+            source=source or platform,
+            up_name=up_name,
+            play_count=play_count,
+            canonical_url=url,
+        )
+
+    def _extract_quote_and_sanitize(self, lines: List[str]):
+        """Extract quote meta and return sanitized lines."""
+        if not lines:
+            return None, lines
+
+        cleaned = [ln.strip() for ln in lines if (ln or "").strip()]
+        if len(cleaned) < 3:
+            return None, cleaned
+
+        first = cleaned[0]
+        second = cleaned[1]
+        if self._is_timestamp_line(first) or self._is_timestamp_line(second):
+            return None, cleaned
+
+        nickname = first.replace("<", "").replace(">", "").strip()
+        quoted_text = second.strip()
+        label = "我" if nickname.startswith("我") else "对方"
+        meta = QuoteMeta(original_nickname=nickname, original_sender_label=label, quoted_text=quoted_text)
+
+        sanitized: list[str] = [quoted_text]
+        for ln in cleaned[2:]:
+            if self._is_timestamp_line(ln):
+                continue
+            sanitized.append(ln)
+
+        return meta, sanitized
+
+    def _is_compact_card(self, bubble_infos) -> bool:
+        """Check if bubbles form a compact card."""
+        try:
+            infos = list(bubble_infos or [])
+            if not infos:
+                return False
+            regions: list[TextRegion] = []
+            for info in infos:
+                regions.extend(info.get("bubble", []) or [])
+            if not regions:
+                return False
+
+            regions_sorted = sorted(regions, key=lambda r: (r.bounding_box.y, r.bounding_box.x))
+            line_count = len(regions_sorted)
+            if line_count < self.options.compact_card_min_lines or line_count > self.options.compact_card_max_lines:
+                return False
+
+            gaps = []
+            for a, b in zip(regions_sorted, regions_sorted[1:]):
+                raw = b.bounding_box.y - (a.bounding_box.y + a.bounding_box.height)
+                gaps.append(raw if raw > 0 else 0)
+            avg_h = sum(r.bounding_box.height for r in regions_sorted) / max(1, line_count)
+            avg_h = max(1.0, float(avg_h))
+            max_gap_norm = (max(gaps) / avg_h) if gaps else 0.0
+            if max_gap_norm > float(self.options.compact_card_max_gap_norm):
+                return False
+
+            xs = [r.bounding_box.x for r in regions_sorted]
+            mx = sum(xs) / max(1, len(xs))
+            var = sum((x - mx) ** 2 for x in xs) / max(1, len(xs))
+            hstd = var ** 0.5
+            return hstd <= float(self.options.compact_card_max_hstd_px)
         except Exception:
             return False
 
     def _should_merge_bubbles_as_text(self, lines: List[str]) -> bool:
-        """判断多气泡文本是否应合并为单条文本消息。
-        条件（保守）：
-        - 总行数在 2-8 之间；
-        - 合并文本不包含 URL 或明显平台/来源关键词（避免误并分享卡片，已在前面检测）；
-        - 最前一段末尾不以句末标点结束（中文“。！？…”或英文 .!?），且整体中文字符比例较高；
-        - 非时间分隔（避免将日期时间并入普通文本）。
-        """
-        try:
-            if not lines:
-                return False
-            valid = [ln.strip() for ln in lines if ln and ln.strip()]
-            if len(valid) < 2 or len(valid) > 8:
-                return False
-            text = "\n".join(valid)
-            if self._is_time_separator(text):
-                return False
-            import re
-            if re.search(r"https?://", text.lower()):
-                return False
-            # 末段判断：第一段最后一行是否为“未完句”
-            first_line = valid[0]
-            if re.search(r"[。！？!?…]$", first_line):
-                return False
-            pure = re.sub(r"\s", "", text)
-            zh_chars = re.findall(r"[\u4e00-\u9fa5]", pure)
-            zh_ratio = (len(zh_chars) / max(len(pure), 1)) if pure else 0.0
-            return zh_ratio >= 0.4
-        except Exception:
-            return False
-
-    def _looks_like_sticker_text(self, lines: List[str]) -> bool:
-        """Heuristically decide whether given lines look like a sticker overlay text.
-
-        函数级注释：
-        - 目标：避免将贴图/表情包上的短句文字误判为普通 TEXT；
-        - 触发特征（保守启发式）：
-          1) 行数不超过 2（贴图上的文字通常为 1-2 行短句）；
-          2) 合并后长度在 3-16 中文字符之间，且中文字符占比高；
-          3) 至少包含一个口语化语气词或常见短句关键词（如“吧/啦/呢/别怕/加油/不哭/晚安/早安/抱抱/亲亲/安心/休息/走吧/再见/拜拜/辛苦了/对不起”等）。
-        - 这是一个防御型规则：若普通文本恰好也命中上述特征，可能被识别为 STICKER；
-          因此仅在行数很少且以口语语气词结尾的短句时触发，尽量减少误判。
-        """
-        import re
+        """Check if bubbles should be merged as text."""
         if not lines:
             return False
-        # 合并并标准化空白
-        text = " ".join([ln.strip() for ln in lines if ln and ln.strip()])
-        if not text:
-            return True  # 无文字但存在气泡，视为贴图（后续导出给出“未识别出文字”备注）
-
-        # 行数限制
-        if len([ln for ln in lines if ln.strip()]) > 2:
+        cleaned = [ln.strip() for ln in lines if (ln or "").strip()]
+        if len(cleaned) < 2:
             return False
-
-        # 中文字符比例与长度窗口
-        pure = re.sub(r"\s", "", text)
-        # 先检测 emoji-only / 短句+emoji 的贴图
-        emoji_pat = re.compile(r"[\U0001F300-\U0001FAFF\U00002700-\U000027BF\U00002600-\U000026FF]")
-        has_emoji = bool(emoji_pat.search(pure))
-        if has_emoji:
-            # 若纯 emoji 或中文<=4 且总长度不超过阈值，倾向判定为贴图
-            zh_chars_emoji = re.findall(r"[\u4e00-\u9fa5]", pure)
-            if (len(zh_chars_emoji) <= 4) and (len(pure) <= (self.options.emoji_sticker_max_length if hasattr(self, 'options') else 8)):
-                return True
-        # 仅计数常见中文字符
-        zh_chars = re.findall(r"[\u4e00-\u9fa5]", pure)
-        zh_ratio = (len(zh_chars) / max(len(pure), 1)) if pure else 0.0
-        if not (3 <= len(zh_chars) <= 16 and zh_ratio >= 0.6):
+        merged = "\n".join(cleaned)
+        low = merged.lower()
+        if "http://" in low or "https://" in low:
             return False
-
-        # 语气词与常见贴图短句关键词
-        particles = {"吧", "啦", "呢", "呗", "嘛", "呀", "哟", "哦", "哇"}
-        keywords = {
-            "安心", "休息", "走吧", "不哭", "晚安", "早安", "加油", "抱抱", "亲亲",
-            "辛苦了", "别怕", "别急", "对不起", "再见", "拜拜", "可以", "你可以", "你安心",
-            # 追加更常见的聊天贴图短句/语气
-            "晚安呀", "哈哈", "哈哈哈", "哈哈哈哈", "谢谢", "不怕", "害怕", "抱抱你",
-            "不会的", "对的", "是的", "是的呀", "好可爱", "太可爱了", "笑死", "笑死我了",
-        }
-        # 合并外部扩展关键词
-        try:
-            extra = set(self.options.extra_sticker_keywords or [])
-            if extra:
-                keywords |= extra
-        except Exception:
-            pass
-        # 至少出现一个语气词或关键词（在词尾出现更可信）
-        has_particle = any(p in pure for p in particles)
-        has_keyword = any(k in pure for k in keywords)
-        if not (has_particle or has_keyword):
+        hints = ("小红书", "哔哩哔哩", "bilibili", "小程序", "微信小程序", "来源：")
+        if any(h in merged for h in hints):
             return False
-
-        # 句末语气词或轻微表态（提高可信度）
-        if re.search(r"[吧啦呢嘛哟哦呀哇]$", pure):
-            return True
-        # 或者整体为鼓励/安慰类短句
-        return has_keyword
-
-    def _extract_share_card(self, content: str) -> Optional[ShareCard]:
-        """Attempt to extract a structured ShareCard from message content.
-
-        函数级注释：
-        - 基于关键词与弱格式规则识别“小红书/哔哩哔哩”分享内容，并提取标题/正文/来源等字段；
-        - 新增“微信小程序”分享识别（如星巴克咖啡礼物），通过常见短语与行级结构提取 app/source/title/body；
-        - 为避免过拟合，采用保守的行级启发式，确保解析失败时回退为普通文本；
-        - 返回 ShareCard 或 None（未命中分享）。
-        """
-        text = content.strip()
-        if not text:
-            return None
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        low = text.lower()
-
-        # 提取第一个 URL（作为 canonical_url）
-        import re
-        url_match = re.search(r"https?://\S+", text)
-        canonical_url = url_match.group(0) if url_match else None
-
-        # 小红书分享识别
-        if ("小红书" in text) or ("red" in low and "book" in low):
-            # 标题：排除明显来源/链接/平台标识后的第一行
-            title = None
-            body_parts: List[str] = []
-            for ln in lines:
-                if ("小红书" in ln) or (ln.startswith("链接")) or (ln.startswith("点击打开")) or (ln.startswith("来源")):
-                    continue
-                if title is None:
-                    title = ln
-                else:
-                    body_parts.append(ln)
-            if title is None:
-                title = lines[0] if lines else ""
-            body = "\n".join(body_parts) if body_parts else None
-            return ShareCard(platform="小红书", title=title, body=body, source="小红书", canonical_url=canonical_url)
-
-        # 哔哩哔哩分享识别
-        if ("哔哩哔哩" in text) or ("bilibili" in low):
-            title = None
-            up_name = None
-            play_count = None
-            body_parts: List[str] = []
-
-            import re
-            up_pat = re.compile(r"(?:UP主|作者)[：:]{0,1}\s*(.+)")
-            play_pat = re.compile(r"(?:播放|播放次数|播放量)[：:]{0,1}\s*([0-9,\.万亿]+)")
-
-            for ln in lines:
-                m_up = up_pat.search(ln)
-                if m_up and not up_name:
-                    up_name = m_up.group(1).strip()
-                    continue
-                m_play = play_pat.search(ln)
-                if m_play and not play_count:
-                    play_count = self._parse_play_count(m_play.group(1))
-                    continue
-                if ("哔哩哔哩" in ln) or ("bilibili" in ln.lower()) or ln.startswith("链接") or (ln.startswith("来源")):
-                    continue
-                if title is None:
-                    title = ln
-                else:
-                    body_parts.append(ln)
-            if title is None:
-                title = lines[0] if lines else ""
-            body = "\n".join(body_parts) if body_parts else None
-            return ShareCard(platform="哔哩哔哩", title=title, body=body, source="哔哩哔哩", up_name=up_name, play_count=play_count, canonical_url=canonical_url)
-
-        # 微信小程序（通用）/ 星巴克咖啡礼物识别
-        # 触发条件（其一）：
-        # - 文本包含“星巴克”且出现“礼物/咖啡礼物/查收/快拆开”等礼物分享常见短语；
-        # - 或包含“微信小程序/小程序”与平台或礼物关键词。
-        mini_prog_hints = {"小程序", "微信小程序"}
-        gift_hints = {"礼物", "咖啡礼物", "查收", "快拆开"}
-        has_mini_prog = any(h in text for h in mini_prog_hints)
-        has_starbucks = ("星巴克" in text)
-        has_gift = any(h in text for h in gift_hints)
-        if (has_starbucks and has_gift) or (has_mini_prog and (has_starbucks or has_gift)):
-            # 识别 app 名（来源）：优先使用包含“星巴克”的行；否则使用包含“小程序”的行的最后一个词
-            source = None
-            app_line = next((ln for ln in lines if "星巴克" in ln), None)
-            if app_line:
-                source = "星巴克"
-            elif has_mini_prog:
-                # 尝试从“XX 小程序”提取平台名
-                import re
-                for ln in lines:
-                    if "小程序" in ln:
-                        m = re.search(r"([\u4e00-\u9fa5A-Za-z0-9]+)\s*小程序", ln)
-                        if m:
-                            source = m.group(1)
-                            break
-            if not source:
-                source = "微信小程序"
-
-            # 识别标题：优先选取包含礼物/查收/快拆开/生日祝语的行
-            title = None
-            for ln in lines:
-                if any(h in ln for h in gift_hints) or ("生日快乐" in ln):
-                    title = ln
-                    break
-            if title is None:
-                # 退化为首行非平台/链接/来源行
-                for ln in lines:
-                    if ("小程序" in ln) or ("链接" in ln) or ("来源" in ln):
-                        continue
-                    title = ln
-                    break
-            if title is None:
-                title = lines[0] if lines else ""
-
-            # 正文：除去平台/链接/来源/标题后剩余的行
-            body_parts: List[str] = []
-            for ln in lines:
-                if ln == title:
-                    continue
-                if ("小程序" in ln) or ("链接" in ln) or ("来源" in ln):
-                    continue
-                body_parts.append(ln)
-            body = "\n".join(body_parts) if body_parts else None
-
-            return ShareCard(platform="微信小程序", title=title, body=body, source=source, canonical_url=canonical_url)
-
-        return None
-
-    def _parse_play_count(self, s: str) -> Optional[int]:
-        """Parse a human-readable play count into integer.
-
-        函数级注释：
-        - 支持“12,345”“12.3万”“1.2亿”等常见格式；
-        - 失败时返回 None，避免抛出异常影响整体解析。
-        """
-        try:
-            st = s.strip().replace(",", "")
-            if "万" in st:
-                num = float(st.replace("万", ""))
-                return int(num * 10000)
-            if "亿" in st:
-                num = float(st.replace("亿", ""))
-                return int(num * 100000000)
-            return int(float(st))
-        except Exception:
-            return None
-
-    def _extract_quote_and_sanitize(self, lines: List[str]) -> tuple[Optional[QuoteMeta], List[str]]:
-        """Detect quote bubble and sanitize lines.
-
-        函数级注释：
-        - 识别首行昵称 + 次行正文的“引用气泡”，剔除昵称与时间戳行；
-        - 生成 QuoteMeta（original_nickname / original_sender_label / quoted_text）；
-        - 返回 (quote_meta, sanitized_lines)。若未命中，quote_meta 为 None，返回原始 lines。
-        """
-        if not lines or len(lines) < 2:
-            return None, lines
-
-        nick = lines[0]
-        # 简单昵称判定：长度适中、非长句、可能包含特殊字符或表情
-        if not self._looks_like_nickname(nick):
-            return None, lines
-
-        # 保守触发条件：必须在后续行中出现至少一行时间戳，避免误将普通两行文本识别为“引用气泡”
-        has_timestamp = any(self._is_timestamp_line(ln) for ln in lines[1:])
-        if not has_timestamp:
-            return None, lines
-
-        escaped_nick = self._escape_nickname(nick)
-        # 纯文本：移除首行昵称与所有时间戳行
-        remaining = [ln for ln in lines[1:] if not self._is_timestamp_line(ln)]
-        quoted_text = remaining[0] if remaining else ""
-        # 身份标签：根据昵称是否近似“我/自己/Me”等
-        label = "我" if self._is_self_nickname(nick) else "对方"
-        meta = QuoteMeta(original_nickname=escaped_nick, original_sender_label=label, quoted_text=quoted_text)
-        return meta, remaining
-
-    def _looks_like_nickname(self, s: str) -> bool:
-        """Heuristic check whether a string looks like a nickname.
-
-        函数级注释：
-        - 昵称通常不超过 32 字符，包含中英文、数字、空格、少量标点或表情；
-        - 排除明显长句（含多个空格或句末标点）、过长文本与 URL 行。
-        """
-        import re
-        st = s.strip()
-        if len(st) > 32:
-            return False
-        if re.search(r"https?://", st):
-            return False
-        # 过长句子的简单排除：超过 2 个空格或包含常见句末标点
-        if len([c for c in st if c == " "]) >= 3:
-            return False
-        if re.search(r"[。！？!?]$", st):
+        if sum(len(x) for x in cleaned) > 400:
             return False
         return True
-
-    def _is_timestamp_line(self, s: str) -> bool:
-        """Check if a line looks like a timestamp.
-
-        函数级注释：
-        - 支持“YYYY-MM-DD HH:MM”“YYYY年M月D日 HH:MM”“今天/昨天 HH:MM”等；
-        - 仅用于引用气泡清洗，避免误伤普通正文。
-        """
-        import re
-        st = s.strip()
-        pats = [
-            r"^\d{4}[\-/年]\d{1,2}[\-/月]\d{1,2}(\s+[0-2]?\d:\d{2})?$",
-            r"^[上|下]?午\s*[0-2]?\d:\d{2}$",
-            r"^(昨天|今天|前天)\s*[0-2]?\d:\d{2}$",
-            r"^[0-2]?\d:\d{2}$",
-        ]
-        for p in pats:
-            if re.match(p, st):
-                return True
-        return False
-
-    def _escape_nickname(self, s: str) -> str:
-        """Escape nickname to avoid rendering issues in HTML/Tkinter.
-
-        函数级注释：
-        - 替换尖括号与和号，移除不可见控制字符；
-        - 保留常见 emoji 与中英文字符，避免过度清洗导致信息丢失。
-        """
-        import re
-        st = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        # 移除所有控制字符
-        st = re.sub(r"[\u0000-\u001F\u007F]", "", st)
-        return st
-
-    def _is_self_nickname(self, s: str) -> bool:
-        """Decide whether the nickname implies 'self'.
-
-        函数级注释：
-        - 通过关键词近似判断（我/我方/自己/me），用于为引用气泡打上“我/对方”标签；
-        - 在不知道真实备注名的情况下，这是一个保守近似。
-        """
-        st = s.strip().lower()
-        candidates = {"我", "我方", "自己", "me", "me."}
-        return (st in candidates) or st.startswith("我")
-    def _is_compact_card(self, infos_slice: List[dict]) -> bool:
-        try:
-            regions = []
-            for inf in infos_slice:
-                for ln in inf.get("bubble", []):
-                    regions.append(ln.bounding_box)
-            if not regions or len(regions) < self.options.compact_card_min_lines:
-                return False
-            lines = sorted(regions, key=lambda r: (r.y, r.x))
-            hs = [max(1, r.height) for r in lines]
-            avg_h = sum(hs) / max(1, len(hs))
-            gaps = []
-            lefts = []
-            for k in range(1, len(lines)):
-                gaps.append(abs(lines[k].y - lines[k-1].y))
-            for r in lines:
-                lefts.append(r.x)
-            if not gaps:
-                return False
-            import statistics
-            med_gap = statistics.median(gaps)
-            gap_norm = med_gap / max(1.0, avg_h)
-            import numpy as np
-            hstd = float(np.std(lefts))
-            n = len(lines)
-            if n < self.options.compact_card_min_lines or n > self.options.compact_card_max_lines:
-                return False
-            if gap_norm <= self.options.compact_card_max_gap_norm and hstd <= float(self.options.compact_card_max_hstd_px):
-                return True
-            return False
-        except Exception:
-            return False

@@ -4,7 +4,7 @@ Handles PaddleOCR integration and image text recognition.
 """
 import time
 import logging
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Any
 from collections import OrderedDict
 import hashlib
 import cv2
@@ -23,6 +23,9 @@ import inspect
 import tempfile
 import os
 import threading
+
+# Fix for OpenMP runtime conflict on macOS (common in PaddleOCR/PyTorch)
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 from models.data_models import OCRResult, TextRegion, Rectangle
 from models.config import OCRConfig
@@ -281,9 +284,14 @@ class OCRProcessor:
                         "use_gpu": bool(getattr(self.config, "use_gpu", False)),
                         "show_log": False,
                         # 资源友好：若 PaddleOCR 支持，在初始化阶段关闭 det，仅加载 rec 模型
-                        "det": False,
-                        "rec": True,
-                    }
+                            "det": False,
+                            "rec": True,
+                            # 强制禁用多进程以避免 macOS 上的 fork 问题
+                            "use_mp": False,
+                            "total_process_num": 0,
+                            # 显式指定轻量级模型版本，避免默认下载 Server 版大模型
+                            "ocr_version": "PP-OCRv4",
+                        }
 
                     # 2) 测试环境兼容：如果 PaddleOCR 被 unittest.mock.Mock 替换，则直接传递完整参数
                     #    以满足 tests/test_ocr_processor.py::test_initialize_engine_success 的断言
@@ -302,7 +310,7 @@ class OCRProcessor:
                         self.logger.debug("Detected mocked PaddleOCR; passing expected kwargs for testing.")
                         self.ocr_engine = _PaddleOCR(**test_kwargs)
                     else:
-                        # 3) 运行时安全：仅向真实 PaddleOCR 传递其支持的参数，避免 TypeError
+                        # 3) 运行时安全：检查参数签名
                         try:
                             init_sig = inspect.signature(_PaddleOCR.__init__)
                         except Exception:
@@ -312,15 +320,41 @@ class OCRProcessor:
                                 init_sig = None
 
                         supported_params = set()
+                        accepts_kwargs = False
                         if init_sig is not None:
                             supported_params = set(init_sig.parameters.keys())
+                            for param in init_sig.parameters.values():
+                                if param.kind == inspect.Parameter.VAR_KEYWORD:
+                                    accepts_kwargs = True
+                                    break
 
-                        sanitized_kwargs = {k: v for k, v in full_kwargs.items() if k in supported_params}
-                        # 如果签名无法解析，采用最保守策略仅传 lang
-                        if not sanitized_kwargs:
-                            sanitized_kwargs = {"lang": lang}
+                        if accepts_kwargs:
+                            # 即使支持 **kwargs，也只传递显式支持的参数或核心参数
+                            # 避免传递不支持的参数（如 use_gpu）导致内部 config parser 报错 "Unknown argument"
+                            sanitized_kwargs = {}
+                            
+                            # 1. lang 是核心参数，总是尝试传递
+                            sanitized_kwargs["lang"] = lang
+                            
+                            # 2. 其他参数仅当显式存在于签名中时才传递
+                            for k, v in full_kwargs.items():
+                                if k == "lang": continue
+                                if k in supported_params:
+                                    sanitized_kwargs[k] = v
+                                    
+                            self.logger.debug(f"PaddleOCR accepts **kwargs, but using strict filtering. kwargs: {list(sanitized_kwargs.keys())}")
+                        else:
+                            # 否则仅传递显式支持的参数
+                            sanitized_kwargs = {k: v for k, v in full_kwargs.items() if k in supported_params}
+                            # 如果签名无法解析且未匹配到任何参数，回退到仅传 lang
+                            if not sanitized_kwargs:
+                                sanitized_kwargs = {"lang": lang}
+                            self.logger.debug(f"PaddleOCR does not accept **kwargs, sanitized arguments: {list(sanitized_kwargs.keys())}")
 
+                        self.logger.info(f"Initializing PaddleOCR engine with kwargs: {sanitized_kwargs}")
+                        self.logger.debug(f"DEBUG: Calling PaddleOCR constructor with: {sanitized_kwargs}")
                         self.ocr_engine = _PaddleOCR(**sanitized_kwargs)
+                        self.logger.debug("DEBUG: PaddleOCR constructor returned")
 
                     # If we reach here, init succeeded
                     if self.config.language != lang:
@@ -916,8 +950,11 @@ class OCRProcessor:
             # - 先缩再滤可将双边滤波等高开销操作的输入尺寸压到合理范围，显著缩短整体耗时；
             # - 裁剪区域不参与该下采样，避免对细小文字产生负面影响。
             input_image_for_preprocess = image
+            scale_factor = 1.0  # 记录缩放因子，用于后续坐标还原
+            
             try:
-                max_side = int(getattr(self.config, "preprocess_max_side", 1280) or 0)
+                # 修复：默认 1280 对高分屏截图过小，会导致小图片丢失。提高默认阈值到 2560。
+                max_side = int(getattr(self.config, "preprocess_max_side", 2560) or 0)
             except Exception:
                 max_side = 0
             # 裁剪区域的可选最大边限制（默认禁用）
@@ -952,24 +989,35 @@ class OCRProcessor:
                 try:
                     if cur_max0 > max_side:
                         scale0 = cur_max0 / float(max_side)
+                        # 更新全局缩放因子
+                        scale_factor = scale0
                         new_w0 = max(1, int(round(w0 / scale0)))
                         new_h0 = max(1, int(round(h0 / scale0)))
                         input_image_for_preprocess = image.resize((new_w0, new_h0), resample=Image.LANCZOS)
-                        self.logger.debug(f"Pre-downsampled full image from {w0}x{h0} to {new_w0}x{new_h0} (max_side={max_side})")
+                        self.logger.debug(f"Pre-downsampled full image from {w0}x{h0} to {new_w0}x{new_h0} (max_side={max_side}, scale={scale_factor:.2f})")
                 except Exception as e:
                     self.logger.debug(f"Failed to pre-downsample image: {e}")
-            elif preprocess and is_cropped_region and crop_max_side > 0:
+            elif preprocess and is_cropped_region:
+                # 针对裁剪的小区域（如气泡），如果高度过小，进行上采样以提高 OCR 识别率
                 try:
-                    wc, hc = image.size
-                    cur_maxc = max(wc, hc)
-                    if cur_maxc > crop_max_side:
-                        scalec = cur_maxc / float(crop_max_side)
-                        new_wc = max(1, int(round(wc / scalec)))
-                        new_hc = max(1, int(round(hc / scalec)))
+                    # 只有当高度小于 80 像素时才上采样（标准微信气泡高度通常在 40-100 之间）
+                    if h0 > 0 and h0 < 80:
+                        scale_up = 2.0
+                        scale_factor = 1.0 / scale_up
+                        new_w0 = int(round(w0 * scale_up))
+                        new_h0 = int(round(h0 * scale_up))
+                        input_image_for_preprocess = image.resize((new_w0, new_h0), resample=Image.LANCZOS)
+                        self.logger.debug(f"Upsampled small cropped region from {w0}x{h0} to {new_w0}x{new_h0} (scale_up={scale_up}, factor={scale_factor:.2f})")
+                    elif crop_max_side > 0 and max(w0, h0) > crop_max_side:
+                         # 原有的下采样逻辑（仅当确实过大时）
+                        scalec = max(w0, h0) / float(crop_max_side)
+                        scale_factor = scalec
+                        new_wc = max(1, int(round(w0 / scalec)))
+                        new_hc = max(1, int(round(h0 / scalec)))
                         input_image_for_preprocess = image.resize((new_wc, new_hc), resample=Image.LANCZOS)
-                        self.logger.debug(f"Pre-downsampled cropped image from {wc}x{hc} to {new_wc}x{new_hc} (crop_max_side={crop_max_side})")
+                        self.logger.debug(f"Pre-downsampled cropped image from {w0}x{h0} to {new_wc}x{new_hc} (crop_max_side={crop_max_side}, scale={scale_factor:.2f})")
                 except Exception as e:
-                    self.logger.debug(f"Failed to pre-downsample cropped image: {e}")
+                    self.logger.debug(f"Failed to resize cropped image: {e}")
 
             # Apply preprocessing if requested
             processed_image = input_image_for_preprocess
@@ -977,12 +1025,16 @@ class OCRProcessor:
                 # 函数级注释：
                 # - 预处理开关源于 OCRConfig，可通过 preprocess_options 覆盖；
                 # - 裁剪区域识别时建议关闭高开销的降噪（双边滤波），整图处理可按需开启。
+                # - 对于裁剪的小区域（气泡），添加填充（padding）有助于 OCR 识别边缘文字。
+                padding_val = 10 if is_cropped_region else 0
+                
                 processed_image = self.preprocessor.preprocess_for_ocr(
                     input_image_for_preprocess,
                     enhance_quality=bool(effective_opts.get("enhance_quality", True)),
                     reduce_noise_flag=bool(effective_opts.get("reduce_noise_flag", True)),
                     convert_grayscale=bool(effective_opts.get("convert_grayscale", True)),
                     noise_method=str(effective_opts.get("noise_method", "bilateral")),
+                    padding=padding_val
                 )
 
             # Ensure image is 3-channel RGB for OCR compatibility
@@ -1003,23 +1055,16 @@ class OCRProcessor:
             def _safe_ocr_call(img_input):
                 """
                 安全调用 PaddleOCR，不同版本兼容策略：
-                1) 优先尝试 engine.ocr()（符合测试的模拟行为），不显式传入 cls 参数；
-                2) 若抛出 TypeError 且提示缺少 cls 或签名包含 cls，则回退为 engine.ocr(img_input, cls=True)；
+                1) 优先尝试 engine.ocr(img_input)（不传入 det/rec 等参数，兼容单测 Mock 与更多版本）；
+                2) 若抛出 TypeError 且提示缺少 cls 或签名包含 cls，则回退为 engine.ocr(img_input, cls=<config>)；
                 3) 若 ocr 不可用或仍失败，再回退为 engine.predict(img_input)。
                 """
                 engine = self.ocr_engine
 
-                # Step 1: try ocr(img_input) without explicit cls
                 try:
-                    # 统一使用识别分支（rec=True, det=False）以避免加载检测模型，降低内存占用
-                    if is_cropped_region:
-                        self.logger.debug("OCR: using engine.ocr() with det=False, rec=True for cropped region")
-                        _t0 = time.time()
-                        _res = engine.ocr(img_input, det=False, rec=True)
-                    else:
-                        self.logger.debug("OCR: using engine.ocr() with det=False, rec=True for full image")
-                        _t0 = time.time()
-                        _res = engine.ocr(img_input, det=False, rec=True)
+                    self.logger.debug("OCR: using engine.ocr()")
+                    _t0 = time.time()
+                    _res = engine.ocr(img_input)
                     try:
                         with self._metrics_lock:
                             self._metrics["ocr_engine_calls"] += 1
@@ -1029,27 +1074,18 @@ class OCRProcessor:
                     return _res
                 except TypeError as te:
                     msg = str(te)
-                    # Some versions require 'cls' argument or error messages indicate missing 'cls'
-                    need_cls = "missing 1 required positional argument" in msg and "cls" in msg
+                    need_cls = ("missing 1 required positional argument" in msg and "cls" in msg)
                     try:
                         sig = inspect.signature(getattr(engine, "ocr"))
                         need_cls = need_cls or ("cls" in sig.parameters)
                     except Exception:
-                        # If introspection fails, rely on error message only
                         pass
-
                     if need_cls:
                         try:
-                            # 根据配置决定是否启用角度分类（cls）以节省不必要的推理开销
                             cls_flag = bool(getattr(self.config, "use_angle_cls", False))
-                            if is_cropped_region:
-                                self.logger.debug(f"OCR: retrying engine.ocr() with det=False, rec=True, cls={cls_flag} for cropped region")
-                                _t1 = time.time()
-                                _res = engine.ocr(img_input, det=False, rec=True, cls=cls_flag)
-                            else:
-                                self.logger.debug(f"OCR: retrying engine.ocr() with det=False, rec=True, cls={cls_flag} for full image")
-                                _t1 = time.time()
-                                _res = engine.ocr(img_input, det=False, rec=True, cls=cls_flag)
+                            self.logger.debug(f"OCR: retrying engine.ocr() with cls={cls_flag}")
+                            _t1 = time.time()
+                            _res = engine.ocr(img_input, cls=cls_flag)
                             try:
                                 with self._metrics_lock:
                                     self._metrics["ocr_engine_calls"] += 1
@@ -1058,11 +1094,8 @@ class OCRProcessor:
                                 pass
                             return _res
                         except Exception:
-                            # Will fall back to predict
                             pass
-                    # If TypeError was unrelated, fall through to predict()
                 except Exception:
-                    # If ocr() raised a non-TypeError, try predict()
                     pass
 
                 # Step 2: fall back to predict(img_input)
@@ -1126,7 +1159,7 @@ class OCRProcessor:
 
             # 使用统一的标准化与构建逻辑，避免不同 PaddleOCR 版本导致的解析差异
             unified_lines = self._normalize_ocr_output(ocr_results)
-            text_regions = self._build_text_regions(unified_lines)
+            text_regions = self._build_text_regions(unified_lines, scale_factor=scale_factor)
             self.logger.debug(f"OCR processed {len(text_regions)} text regions in {time.time() - start_time:.2f}s")
 
             # 统一聚合 OCRResult
@@ -1298,6 +1331,15 @@ class OCRProcessor:
                                 x_coords = [p[0] for p in bbox if isinstance(p, (list, tuple)) and len(p) >= 2]
                                 y_coords = [p[1] for p in bbox if isinstance(p, (list, tuple)) and len(p) >= 2]
                             if x_coords and y_coords:
+                                # Apply scaling factor to restore original coordinates
+                                print(f"DEBUG_PRINT: scale_factor={scale_factor}, x_coords[0]={x_coords[0]}")
+                                if scale_factor != 1.0:
+                                    self.logger.debug(f"Applying scale factor {scale_factor} to coords: {x_coords[:1]}...")
+                                    x_coords = [int(x * scale_factor) for x in x_coords]
+                                    y_coords = [int(y * scale_factor) for y in y_coords]
+                                else:
+                                    self.logger.debug(f"Scale factor is 1.0, skipping scaling. x_coords: {x_coords[:1]}")
+
                                 bounding_box = Rectangle(
                                     x=int(min(x_coords)),
                                     y=int(min(y_coords)),
@@ -1540,7 +1582,7 @@ class OCRProcessor:
 
         return lines
 
-    def _build_text_regions(self, lines: list) -> List[TextRegion]:
+    def _build_text_regions(self, lines: list, scale_factor: float = 1.0) -> List[TextRegion]:
         """
         根据标准行列表构建 TextRegion 列表，并执行置信度过滤与边界框转换。
 
@@ -1551,6 +1593,7 @@ class OCRProcessor:
 
         Args:
             lines: 标准化后的 OCR 行列表
+            scale_factor: 坐标缩放因子，默认为 1.0
 
         Returns:
             List[TextRegion]: 文本区域列表
@@ -1609,6 +1652,11 @@ class OCRProcessor:
                         x_coords = [p[0] for p in bbox if isinstance(p, (list, tuple)) and len(p) >= 2]
                         y_coords = [p[1] for p in bbox if isinstance(p, (list, tuple)) and len(p) >= 2]
                     if x_coords and y_coords:
+                        # Apply scaling factor to restore original coordinates
+                        if scale_factor != 1.0:
+                            x_coords = [int(x * scale_factor) for x in x_coords]
+                            y_coords = [int(y * scale_factor) for y in y_coords]
+
                         bounding_box = Rectangle(
                             x=int(min(x_coords)),
                             y=int(min(y_coords)),
@@ -1962,12 +2010,14 @@ class OCRProcessor:
 
             med_w, med_h, med_a = typical_text_metrics if typical_text_metrics else (0.0, 0.0, 0.0)
 
-            # 绝对尺寸过滤：过小区域大概率是噪声
-            if min(w, h) < 46:
+            # 绝对尺寸过滤：过小区域大概率是噪声 (放宽至 10px 以支持极小图标)
+            if min(w, h) < 10:
                 return False
-            # 相对整图面积：至少超过 0.5%
-            if rel_area < 0.005:
-                return False
+            # 相对整图面积：至少超过 0.01%（放宽以支持小贴图）
+            if rel_area < 0.0001:
+                # 二次检查：如果是绝对尺寸合格的小图（如 10x10 表情），也允许
+                if area < 100:
+                    return False
 
             # 与文本区域中位尺寸比较：显著更大则可能是媒体气泡
             bigger_than_text = False
@@ -1978,30 +2028,58 @@ class OCRProcessor:
             if med_a > 0 and area >= (med_a * 2.4):
                 bigger_than_text = True
 
+            aspect = (w / max(h, 1))
+            # 放宽 Sticker 判定范围
+            sticker_like = (0.4 <= aspect <= 2.5 and min(w, h) >= 20 and area >= 400)
+
             # 无文本区域时，采用保守绝对阈值
             if med_w == 0 and med_h == 0 and med_a == 0:
-                if min(w, h) >= 64 or area >= 6000:
+                if min(w, h) >= 30 or area >= 900:
                     bigger_than_text = True
 
-            if not bigger_than_text:
+            if not (bigger_than_text or sticker_like):
                 return False
 
-            # 长宽比过滤：过于扁长更像文本行，图片/贴图通常在 0.5~2.5 之间
-            aspect = (w / max(h, 1))
-            if not (0.5 <= aspect <= 2.5):
+            # 长宽比过滤：过于扁长更像文本行
+            if not (0.2 <= aspect <= 5.0):
                 return False
 
-            # 边缘密度（加分项）：图片/贴图常具有较多边缘结构
+            # 边缘密度与灰度方差：用于排除“大片纯色背景”被误当作媒体气泡
             try:
                 if cropped_img is not None:
+                    try:
+                        if self.preprocessor.is_text_bubble(cropped_img):
+                            return False
+                    except Exception:
+                        pass
+
                     arr = np.array(cropped_img)
                     if arr.ndim == 3:
                         gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
                     else:
                         gray = arr.astype(np.uint8)
+                    
+                    std = float(np.std(gray))
+
+                    # [Enhance] Use solid background check first
+                    # 提高阈值至 0.95，以避免误判包含大面积背景的简单图标（如 65% 背景的圆形图标）为纯色背景
+                    # 纯色气泡（如绿色文本框）通常背景占比 > 98%
+                    # 【重要修复】必须结合 std 校验，因为低对比度图片（std~3.9）经颜色量化后可能被误判为纯色
+                    if self.preprocessor.is_solid_background(cropped_img, threshold=0.95):
+                        # 只有当标准差极低（< 3.0）时才确认为纯色背景
+                        if std < 3.0:
+                            return False
+
                     edges = cv2.Canny(gray, 50, 150)
                     density = float(np.count_nonzero(edges)) / float(edges.size)
-                    if density < 0.02:
+                    
+                    # 降低标准差阈值，以支持低对比度暗色图片 (std ~3.9)
+                    # 纯色块的 std 通常 < 2.0 (压缩噪声)
+                    if density < 0.001 and std < 3.0:
+                        return False
+                    # Sticker 形状的区域，如果边缘极少且方差低，也认为是噪声/背景
+                    # 将 std 阈值从 10.0 降至 3.5，以避免误杀低对比度图片
+                    if sticker_like and density < 0.003 and std < 3.5:
                         return False
             except Exception:
                 # 边缘提取失败不影响主判定
@@ -2011,7 +2089,33 @@ class OCRProcessor:
         except Exception:
             return False
     
-    def detect_and_process_regions(self, image: Image.Image, max_regions: int = 25) -> List[Tuple[TextRegion, OCRResult]]:
+    def _refine_image_region(self, image: Image.Image, region: TextRegion) -> None:
+        """
+        Refine the bounding box of an image region to remove background.
+        Updates the region in-place.
+        """
+        try:
+            # Crop the current loose region
+            crop = self.preprocessor.crop_text_region(image, region.bounding_box)
+            # Find tight box relative to crop
+            tight_rel = self.preprocessor.refine_crop(crop)
+            
+            # If significant reduction, update region
+            # (Avoid trivial updates)
+            if (tight_rel.width < crop.width or tight_rel.height < crop.height):
+                
+                new_x = region.bounding_box.x + tight_rel.x
+                new_y = region.bounding_box.y + tight_rel.y
+                new_w = tight_rel.width
+                new_h = tight_rel.height
+                
+                old_w, old_h = region.bounding_box.width, region.bounding_box.height
+                region.bounding_box = Rectangle(new_x, new_y, new_w, new_h)
+                self.logger.debug(f"Refined image region: {new_w}x{new_h} (was {old_w}x{old_h})")
+        except Exception as e:
+            self.logger.warning(f"Failed to refine image region: {e}")
+
+    def detect_and_process_regions(self, image: Image.Image, max_regions: int = 50) -> List[Tuple[TextRegion, OCRResult]]:
         """
         Detect text regions and process each region separately for better accuracy.
         
@@ -2053,6 +2157,26 @@ class OCRProcessor:
                     self._metrics["region_cache_misses"] += 1
             except Exception:
                 pass
+            # Step 1: Smart ROI Cropping (Content Detection)
+            # Focus on the active content area to avoid static borders and improve OCR attention
+            roi_rect = self.preprocessor.detect_content_roi(image)
+            roi_x, roi_y = int(roi_rect.x), int(roi_rect.y)
+            roi_w, roi_h = int(roi_rect.width), int(roi_rect.height)
+            
+            # Crop to ROI if it's significantly smaller than the full image
+            full_w, full_h = image.size
+            is_roi_applied = (roi_w < full_w * 0.95) or (roi_h < full_h * 0.95)
+            
+            if is_roi_applied:
+                self.logger.debug(f"Applying ROI crop: {roi_rect}")
+                processing_image = image.crop((roi_x, roi_y, roi_x + roi_w, roi_y + roi_h))
+            else:
+                processing_image = image
+            
+            # Step 2: Local Contrast Enhancement (CLAHE) for Dark Mode/Low Contrast
+            # This helps in bringing out text/image boundaries in dark themes
+            processing_image = self.preprocessor.enhance_local_contrast(processing_image)
+
             # Detect potential text regions
             # 在区域检测阶段可按需下采样以降低形态学与轮廓开销（坐标会缩放回原图）
             try:
@@ -2063,26 +2187,113 @@ class OCRProcessor:
             regions_func = self.preprocessor.detect_text_regions
             try:
                 sig = inspect.signature(regions_func)
+                # Apply ROI cropping and CLAHE results to detection
+                kwargs = {}
                 if "max_side" in sig.parameters:
-                    detected_regions = regions_func(image, max_side=detect_max_side)
-                else:
-                    detected_regions = regions_func(image)
-            except Exception:
+                    kwargs["max_side"] = detect_max_side
+                if "min_area" in sig.parameters:
+                    kwargs["min_area"] = 50 # Lower threshold for small icons
+                # Disable text bubble filtering for OCR (we want to read the text!)
+                if "filter_text_bubbles" in sig.parameters:
+                    kwargs["filter_text_bubbles"] = False
+                
+                detected_regions = regions_func(processing_image, **kwargs)
+
+            except Exception as e:
                 # 回退：直接以旧签名调用，避免因签名解析异常导致下游失败
-                detected_regions = regions_func(image)
-            # Performance optimization: limit to top-N regions by area
+                self.logger.warning(f"Region detection with params failed: {e}, falling back")
+                detected_regions = regions_func(processing_image)
+
+            # [IMPORTANT] Map coordinates back to original image if ROI was applied
+            if is_roi_applied:
+                mapped_regions = []
+                for reg in detected_regions:
+                    mapped_regions.append(Rectangle(
+                        x=reg.x + roi_x,
+                        y=reg.y + roi_y,
+                        width=reg.width,
+                        height=reg.height
+                    ))
+                detected_regions = mapped_regions
             if len(detected_regions) > max_regions:
-                detected_regions = sorted(
+                regions_by_area = sorted(
                     detected_regions,
                     key=lambda r: r.width * r.height,
-                    reverse=True
-                )[:max_regions]
+                    reverse=True,
+                )
+                reserve = 0
+                try:
+                    reserve = min(12, max(4, int(max_regions * 0.25)))
+                except Exception:
+                    reserve = 8
+                large_keep = max(0, max_regions - reserve)
+                kept = regions_by_area[:large_keep]
+
+                kept_keys = {(int(r.x), int(r.y), int(r.width), int(r.height)) for r in kept}
+
+                def _media_score(r: Rectangle) -> float:
+                    w = float(max(getattr(r, "width", 0), 0))
+                    h = float(max(getattr(r, "height", 0), 0))
+                    a = w * h
+                    if a <= 0:
+                        return 0.0
+                    sq = min(w, h) / max(w, h)
+                    return sq * a
+
+                remaining = regions_by_area[large_keep:]
+                media_candidates = []
+                for r in remaining:
+                    w = int(max(getattr(r, "width", 0), 0))
+                    h = int(max(getattr(r, "height", 0), 0))
+                    if min(w, h) < 20:
+                        continue
+                    if w * h < 400:
+                        continue
+                    media_candidates.append(r)
+                media_candidates = sorted(media_candidates, key=_media_score, reverse=True)[:reserve]
+
+                for r in media_candidates:
+                    k = (int(r.x), int(r.y), int(r.width), int(r.height))
+                    if k not in kept_keys:
+                        kept.append(r)
+                        kept_keys.add(k)
+
+                detected_regions = kept[:max_regions]
             
             results: List[Tuple[TextRegion, OCRResult]] = []
             # 收集“无文字”的候选区域，后续基于几何与相对尺寸进行媒体气泡（图片/贴图）判定
             empty_candidates: List[Tuple[Rectangle, Image.Image, OCRResult]] = []
             
             for region_rect in detected_regions:
+                # [Optimization] Refine crop region to be tight around content with padding
+                # 1. Expand region slightly to capture potential missing edges or context
+                # This ensures we have enough background to identify the true content boundary
+                exp_padding = 50
+                img_w, img_h = image.size
+                exp_x = max(0, region_rect.x - exp_padding)
+                exp_y = max(0, region_rect.y - exp_padding)
+                exp_w = min(img_w - exp_x, region_rect.width + 2 * exp_padding)
+                exp_h = min(img_h - exp_y, region_rect.height + 2 * exp_padding)
+                expanded_rect = Rectangle(x=int(exp_x), y=int(exp_y), width=int(exp_w), height=int(exp_h))
+                
+                # 2. Crop the expanded region
+                expanded_img = self.preprocessor.crop_text_region(image, expanded_rect)
+                
+                # 3. Refine to get tight content box + 15px padding
+                # This removes extra background while keeping a consistent buffer
+                refined_local = self.preprocessor.refine_crop(expanded_img, padding=15)
+                
+                # 4. Map back to original coordinates
+                final_rect = Rectangle(
+                    x=int(expanded_rect.x + refined_local.x),
+                    y=int(expanded_rect.y + refined_local.y),
+                    width=int(refined_local.width),
+                    height=int(refined_local.height)
+                )
+                
+                # Update region_rect for downstream processing
+                region_rect = final_rect
+
                 # Crop the region
                 cropped_image = self.preprocessor.crop_text_region(image, region_rect)
                 
@@ -2170,12 +2381,33 @@ class OCRProcessor:
 
                 for rect, cropped_img, ocr_res in empty_candidates:
                     if self._is_likely_media_bubble(rect, (img_w, img_h), typical, cropped_img):
-                        # 生成占位区域（空文本），保留置信度为低值以避免误导
+                        kind = "image"
+                        try:
+                            w = int(max(getattr(rect, "width", 0), 0))
+                            h = int(max(getattr(rect, "height", 0), 0))
+                            aspect = float(w / max(h, 1))
+                            rel_area = float((w * h) / max(img_w * img_h, 1))
+                            max_side = max(w, h)
+                            min_side = min(w, h)
+                            if (
+                                0.75 <= aspect <= 1.35
+                                and 40 <= min_side <= 340
+                                and max_side <= int(round(min(img_w, img_h) * 0.38))
+                                and rel_area <= 0.10
+                            ):
+                                kind = "sticker"
+                        except Exception:
+                            kind = "image"
+
                         placeholder = TextRegion(
                             text="",
                             bounding_box=rect,
-                            confidence=max(float(getattr(ocr_res, "confidence", 0.0)), 0.05)
+                            confidence=max(float(getattr(ocr_res, "confidence", 0.0)), 0.05),
+                            type=kind,
                         )
+                        # Refine image crop (remove extra background)
+                        self._refine_image_region(image, placeholder)
+                        
                         # 去重：避免与已有文本区域发生较大重叠（IoU 高）
                         overlapped = False
                         for existing, _ in results:
@@ -2188,6 +2420,82 @@ class OCRProcessor:
             except Exception as ge:
                 # 启发式失败不影响主流程，记录调试日志
                 self.logger.debug(f"Empty-bubble heuristic failed: {ge}")
+
+            # 三次处理：检查已识别为文本的区域，防止将图片误识别为乱码文本
+            # 尤其是置信度较低，或者几何特征强烈的区域
+            for i, (txt_reg, ocr_res) in enumerate(results):
+                if getattr(txt_reg, "type", "text") == "text":
+                    should_reclassify = False
+                    clean_txt = txt_reg.text.strip()
+                    has_chinese = any('\u4e00' <= c <= '\u9fff' for c in clean_txt)
+
+                    # 1. 置信度检查
+                    if txt_reg.confidence < 0.6:
+                        # 长文本保护 (>= 5 chars)
+                        if len(clean_txt) >= 5:
+                            if has_chinese:
+                                # 中文长文本，极难被转为图片，除非置信度极低
+                                if txt_reg.confidence < 0.2:
+                                    should_reclassify = True
+                            else:
+                                # 非中文长文本
+                                if txt_reg.confidence < 0.4:
+                                    should_reclassify = True
+                        
+                        # 短文本处理 (< 5 chars)
+                        else:
+                            if has_chinese:
+                                # 中文短文本 ("搞好了" conf~0.5) -> 保护
+                                if txt_reg.confidence < 0.3:
+                                    should_reclassify = True
+                            else:
+                                # 非中文短文本 -> 容易是误识
+                                should_reclassify = True
+                                
+                    # 2. 乱码/垃圾内容检查 (即使置信度 >= 0.6)
+                    else:
+                        # 极短且非数字非中文
+                        if len(clean_txt) <= 2 and not clean_txt.isdigit() and not has_chinese:
+                            should_reclassify = True
+                        # 短符号串
+                        elif len(clean_txt) < 5 and not has_chinese and not clean_txt.isalnum():
+                            should_reclassify = True
+                    
+                    if should_reclassify:
+                        # [Fix] Final safety check: Text bubbles usually have solid background (Green/White)
+                        # If it's a solid block, it's likely a text bubble, even if low confidence.
+                        try:
+                            bbox = txt_reg.bounding_box
+                            # Crop from original image to check color
+                            # Ensure coordinates are within bounds
+                            l, t = int(max(0, bbox.x)), int(max(0, bbox.y))
+                            r, b = int(min(image.width, l + bbox.width)), int(min(image.height, t + bbox.height))
+                            
+                            if r > l and b > t:
+                                region_crop = image.crop((l, t, r, b))
+                                # Use a stricter threshold (0.95) and combine with std dev check
+                                # Text bubbles are digitally solid, while photos (even dark ones) have noise.
+                                is_solid = self.preprocessor.is_solid_background(region_crop, threshold=0.95)
+                                
+                                if is_solid:
+                                    # Calculate std dev to distinguish solid color from low-contrast photo
+                                    # Solid text bubbles typically have std < 2.0 (background noise)
+                                    # Dark photos typically have std > 3.5 even if low contrast
+                                    arr = np.array(region_crop.convert('L'))
+                                    std = float(np.std(arr))
+                                    
+                                    if std < 3.0: # Only prevent if it's truly flat
+                                        self.logger.info(f"Prevented reclassification for solid background region: '{clean_txt}' (std={std:.2f})")
+                                        should_reclassify = False
+                                    else:
+                                        self.logger.debug(f"Solid background check passed but high std dev ({std:.2f}), allowing reclassification.")
+                        except Exception as bg_chk_err:
+                            self.logger.warning(f"Background check failed: {bg_chk_err}")
+            
+                    if should_reclassify:
+                        txt_reg.type = "image"
+                        self._refine_image_region(image, txt_reg)
+                        self.logger.debug(f"Reclassified text region as image: '{clean_txt}' (conf={txt_reg.confidence:.2f})")
             
             self.logger.debug(f"Processed {len(results)} text regions separately")
             # 写入整图级区域结果缓存（包括空结果，重复图像可快速返回）

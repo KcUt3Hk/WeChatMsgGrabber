@@ -12,7 +12,7 @@ import subprocess
 import os
 import pygetwindow as gw
 import pyautogui
-from PIL import Image
+from PIL import Image, ImageGrab
 import cv2
 import numpy as np
 
@@ -73,13 +73,20 @@ class AutoScrollController:
         self._rate_range_max: Optional[int] = None
 
         # 看门狗相关
-        # macOS AppleScript 回退：默认关闭，避免在测试/CI环境触发系统级调用造成不稳定。
-        # 可通过构造参数或环境变量 WECHATMSGG_MACOS_FALLBACK 显式开启。
+        # macOS AppleScript 回退：默认在 macOS 上开启，除非环境变量明确禁用或 CI 环境
+        # 可通过构造参数或环境变量 WECHATMSGG_MACOS_FALLBACK 显式开启/关闭。
         if enable_macos_fallback is not None:
             self.enable_macos_fallback = bool(enable_macos_fallback)
         else:
-            env_macos_fb = os.environ.get("WECHATMSGG_MACOS_FALLBACK", "0").lower()
-            self.enable_macos_fallback = env_macos_fb in ("1", "true", "yes", "on")
+            env_macos_fb = os.environ.get("WECHATMSGG_MACOS_FALLBACK", "").lower()
+            if env_macos_fb in ("1", "true", "yes", "on"):
+                self.enable_macos_fallback = True
+            elif env_macos_fb in ("0", "false", "no", "off"):
+                self.enable_macos_fallback = False
+            else:
+                # Default logic: True on macOS if not CI
+                is_ci = os.environ.get("CI", "false").lower() == "true"
+                self.enable_macos_fallback = (sys.platform == "darwin" and not is_ci)
 
         env_watchdog = os.environ.get("WECHATMSGG_ENABLE_WATCHDOG", "0").lower()
         self._watchdog_enabled = (
@@ -134,7 +141,8 @@ class AutoScrollController:
         """
         try:
             # Search for WeChat windows with common titles (or CLI-provided override)
-            wechat_titles = [self._title_override] if self._title_override else ["微信", "WeChat", "wechat"]
+            # Remove generic 'wechat' to avoid matching project folders like 'wechatmsgg' in IDEs
+            wechat_titles = [self._title_override] if self._title_override else ["微信", "WeChat"]
             
             # Provide compatibility for environments where pygetwindow
             # does not expose getWindowsWithTitle by creating a graceful fallback.
@@ -254,17 +262,20 @@ class AutoScrollController:
                 # Log unsupported type for visibility
                 self.logger.warning("Active window is unsupported type for fallback: %r", active)
 
-            self.logger.warning("No WeChat window found")
-            # macOS 专用回退：仅在启用时使用 AppleScript 通过 System Events 获取微信窗口位置
+            # macOS 专用回退：仅在启用时使用 Quartz/AppleScript 获取微信窗口位置
             if sys.platform == "darwin" and self.enable_macos_fallback:
+                self.logger.debug("No WeChat title matched via window APIs; trying macOS fallback...")
                 info = self._macos_resolve_wechat_window(wechat_titles)
                 if info:
                     self.current_window = info
                     self.logger.info(
-                        "Resolved WeChat window via macOS AppleScript fallback: '%s' at (%d, %d) size (%d x %d)",
+                        "Resolved WeChat window via macOS fallback: '%s' at (%d, %d) size (%d x %d)",
                         info.title, info.position.x, info.position.y, info.position.width, info.position.height
                     )
                     return info
+
+            self.logger.warning("No WeChat window found")
+            self.logger.error("未找到微信窗口。请确保微信已运行且窗口可见。如果自动检测失败，请使用 GUI 的'框选'功能或命令行 --chat-area 参数手动指定区域。")
             return None
             
         except Exception as e:
@@ -926,6 +937,11 @@ class AutoScrollController:
     def capture_current_view(self) -> Optional[Image.Image]:
         """
         Capture screenshot of current WeChat chat area.
+
+        函数级注释：
+        - 在 macOS Retina/缩放场景下，窗口 API 返回的坐标可能是“点”(pt)，而截图 API 期望“像素”(px)；
+        - 当检测到截图返回的尺寸与期望区域尺寸存在稳定比例（如 2x）时，自动按比例重算 region/bbox 并重试一次；
+        - 该自适应逻辑默认不影响单元测试（Mock 的 Image.size 通常不是有效二元组），仅在真实截图尺寸可用时触发。
         
         Returns:
             PIL Image of chat area, None if capture failed
@@ -947,16 +963,107 @@ class AutoScrollController:
                 self.logger.error("Could not determine chat area for screenshot")
                 return None
             
-            # Capture screenshot of chat area
-            screenshot = pyautogui.screenshot(region=(
-                chat_area.x,
-                chat_area.y,
-                chat_area.width,
-                chat_area.height
-            ))
+            # Capture screenshot of chat area using ImageGrab (often more reliable on macOS)
+            # ImageGrab.grab accepts bbox=(left, top, right, bottom)
+            # Note: chat_area.width/height are dimensions, so we calculate right/bottom
+            bbox = (
+                int(chat_area.x),
+                int(chat_area.y),
+                int(chat_area.x + chat_area.width),
+                int(chat_area.y + chat_area.height)
+            )
             
+            # Ensure coordinates are valid
+            if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                self.logger.error(f"Invalid capture region: {bbox}")
+                return None
+
+            region = (
+                int(chat_area.x),
+                int(chat_area.y),
+                int(chat_area.width),
+                int(chat_area.height),
+            )
+
+            screenshot = None
+            try:
+                screenshot = pyautogui.screenshot(region=region)
+                self.logger.debug(f"Captured screenshot via pyautogui: {getattr(screenshot, 'size', None)} (Region: {region})")
+            except Exception as e:
+                self.logger.debug(f"pyautogui screenshot failed, fallback to ImageGrab: {e}")
+
+            def _maybe_retry_scaled_capture(img: Optional[Image.Image]) -> Optional[Image.Image]:
+                """函数级注释：
+                - 若 img.size 与 region 的 (w,h) 存在明显缩放比例（如 2.0），则按该比例对坐标与尺寸做缩放后重试截图；
+                - 仅在尺寸可解析为 (int,int) 且比例稳定时触发；否则直接返回原图。"""
+                try:
+                    if img is None:
+                        return None
+                    size = getattr(img, "size", None)
+                    if not (isinstance(size, tuple) and len(size) == 2):
+                        return img
+                    iw, ih = size
+                    if not (isinstance(iw, int) and isinstance(ih, int)):
+                        return img
+                    exp_w, exp_h = int(region[2]), int(region[3])
+                    if exp_w <= 0 or exp_h <= 0:
+                        return img
+                    if iw == exp_w and ih == exp_h:
+                        return img
+                    sx = iw / float(exp_w)
+                    sy = ih / float(exp_h)
+                    if not (1.2 <= sx <= 3.5 and 1.2 <= sy <= 3.5):
+                        return img
+                    if abs(sx - sy) > 0.15:
+                        return img
+
+                    scaled_region = (
+                        int(round(region[0] * sx)),
+                        int(round(region[1] * sy)),
+                        int(round(region[2] * sx)),
+                        int(round(region[3] * sy)),
+                    )
+                    if scaled_region[2] <= 0 or scaled_region[3] <= 0:
+                        return img
+                    self.logger.debug(f"Retry scaled screenshot: scale=({sx:.2f},{sy:.2f}), region={scaled_region}")
+                    try:
+                        return pyautogui.screenshot(region=scaled_region)
+                    except Exception:
+                        return img
+                except Exception:
+                    return img
+
+            screenshot = _maybe_retry_scaled_capture(screenshot)
+
+            if screenshot is None:
+                screenshot = ImageGrab.grab(bbox=bbox, all_screens=True)
+                self.logger.debug(f"Captured screenshot via ImageGrab: {getattr(screenshot, 'size', None)} (Region: {bbox})")
+                try:
+                    if screenshot is not None:
+                        size = getattr(screenshot, "size", None)
+                        if isinstance(size, tuple) and len(size) == 2 and all(isinstance(v, int) for v in size):
+                            iw, ih = size
+                            exp_w = int(bbox[2] - bbox[0])
+                            exp_h = int(bbox[3] - bbox[1])
+                            if exp_w > 0 and exp_h > 0 and (iw != exp_w or ih != exp_h):
+                                sx = iw / float(exp_w)
+                                sy = ih / float(exp_h)
+                                if 1.2 <= sx <= 3.5 and 1.2 <= sy <= 3.5 and abs(sx - sy) <= 0.15:
+                                    scaled_bbox = (
+                                        int(round(bbox[0] * sx)),
+                                        int(round(bbox[1] * sy)),
+                                        int(round(bbox[2] * sx)),
+                                        int(round(bbox[3] * sy)),
+                                    )
+                                    if scaled_bbox[2] > scaled_bbox[0] and scaled_bbox[3] > scaled_bbox[1]:
+                                        self.logger.debug(f"Retry scaled ImageGrab: scale=({sx:.2f},{sy:.2f}), bbox={scaled_bbox}")
+                                        screenshot2 = ImageGrab.grab(bbox=scaled_bbox, all_screens=True)
+                                        if screenshot2 is not None:
+                                            screenshot = screenshot2
+                except Exception:
+                    pass
+
             self.last_screenshot = screenshot
-            self.logger.debug(f"Captured screenshot: {chat_area.width}x{chat_area.height}")
             return screenshot
             
         except Exception as e:
@@ -1417,21 +1524,69 @@ class AutoScrollController:
         return best
     def _macos_resolve_wechat_window(self, patterns: list[str]) -> Optional[WindowInfo]:
         """
-        macOS 专用：通过 AppleScript/System Events 解析微信窗口信息。
-
-        该方法在 pygetwindow 无法枚举或返回字符串 Active Window 时使用，
-        直接向系统查询 WeChat/微信 应用进程的前台窗口的标题与边界。
-
-        Args:
-            patterns: 用于匹配窗口标题的关键字列表（如 ["微信", "WeChat"]).
-
-        Returns:
-            WindowInfo，如果成功获取到窗口信息；否则 None。
+        macOS 专用：通过 Quartz (优先) 或 AppleScript 解析微信窗口信息。
         """
         if sys.platform != "darwin":
             return None
+
+        # 1. Try Quartz (Core Graphics) - Most reliable for finding windows
         try:
-            # 1) 直接查询 WeChat 的首个窗口（单行 AppleScript，避免多行解析问题）
+            import Quartz
+            
+            def _find_in_quartz(opts):
+                window_list = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
+                candidates = []
+                for window in window_list:
+                    owner = window.get('kCGWindowOwnerName', '')
+                    name = window.get('kCGWindowName', '')
+                    bounds = window.get('kCGWindowBounds', {})
+                    
+                    # Check for WeChat
+                    if 'WeChat' in str(owner) or '微信' in str(owner):
+                        if bounds:
+                            x = int(bounds.get('X', 0))
+                            y = int(bounds.get('Y', 0))
+                            w = int(bounds.get('Width', 0))
+                            h = int(bounds.get('Height', 0))
+                            
+                            # Filter out small icons/tooltips/menu bars
+                            if w > 200 and h > 200: 
+                                title = name if name else owner
+                                self.logger.debug(f"Quartz candidate found: {title} ({w}x{h})")
+                                candidates.append(WindowInfo(
+                                    handle=0,
+                                    position=Rectangle(x=x, y=y, width=w, height=h),
+                                    is_active=True,
+                                    title=title,
+                                ))
+                            else:
+                                self.logger.debug(f"Quartz candidate ignored (too small): {owner}/{name} ({w}x{h})")
+                self.logger.debug(f"Quartz pass found {len(candidates)} candidates")
+                return candidates
+
+            # First pass: OnScreenOnly (visible windows)
+            options = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+            results = _find_in_quartz(options)
+            
+            if not results:
+                self.logger.debug("Quartz OnScreenOnly found no windows, retrying with all windows (including off-screen/minimized)...")
+                # Second pass: All windows (exclude desktop elements)
+                options = Quartz.kCGWindowListExcludeDesktopElements
+                results = _find_in_quartz(options)
+            
+            if results:
+                # Pick the largest window by area, assuming it's the main chat window
+                best = max(results, key=lambda w: w.position.width * w.position.height)
+                self.logger.info(f"Quartz resolved window: {best.title} at {best.position}")
+                return best
+                
+        except ImportError:
+            self.logger.debug("Quartz module not found, skipping Quartz fallback")
+        except Exception as e:
+            self.logger.debug(f"Quartz window detection failed: {e}")
+
+        try:
+            # 2) 直接查询 WeChat 的首个窗口（单行 AppleScript，避免多行解析问题）
             for app_name in ("WeChat", "微信"):
                 cmd = (
                     'tell application "System Events" to tell (first application process whose name is "' + app_name + '") '
@@ -1481,8 +1636,11 @@ class AutoScrollController:
                         proc_name = parts2[0]
                         win_title = parts2[1]
                         x2, y2, w2, h2 = int(parts2[2]), int(parts2[3]), int(parts2[4]), int(parts2[5])
-                        # 如果前台应用是微信，则直接返回，不再要求窗口标题匹配
-                        if proc_name in ("WeChat", "微信") or any(pat.lower() in win_title.lower() for pat in patterns):
+                        # 如果前台应用是微信，则直接返回；否则仅当进程不是常见编辑器/终端且标题匹配时返回
+                        if proc_name in ("WeChat", "微信") or (
+                            any(pat.lower() in win_title.lower() for pat in patterns)
+                            and proc_name not in ("Electron", "Code", "Terminal", "iTerm2", "Trae", "python3.12", "Python")
+                        ):
                             return WindowInfo(
                                 handle=0,
                                 position=Rectangle(x=x2, y=y2, width=w2, height=h2),

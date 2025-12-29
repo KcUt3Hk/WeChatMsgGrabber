@@ -20,8 +20,10 @@ def test_detect_and_process_regions_uses_cache(monkeypatch):
         return rects
 
     def fake_crop_text_region(image, region):
-        # always return the same cropped image object with identical pixels
         return identical_crop.copy()
+
+    def fake_refine_crop(img, padding=15):
+        return Rectangle(x=0, y=0, width=img.width, height=img.height)
 
     calls = {"count": 0}
 
@@ -31,6 +33,7 @@ def test_detect_and_process_regions_uses_cache(monkeypatch):
 
     monkeypatch.setattr(ocr.preprocessor, "detect_text_regions", fake_detect_text_regions)
     monkeypatch.setattr(ocr.preprocessor, "crop_text_region", fake_crop_text_region)
+    monkeypatch.setattr(ocr.preprocessor, "refine_crop", fake_refine_crop)
     monkeypatch.setattr(ocr, "process_image", fake_process_image)
 
     results = ocr.detect_and_process_regions(base_img, max_regions=10)
@@ -60,15 +63,29 @@ def test_ocr_cache_respects_max_items(monkeypatch):
     def fake_detect_text_regions(image):
         return rects
 
+    state = {"refine_calls": 0}
+
     def fake_crop_text_region(image, region):
-        idx = rects.index(region)
-        return Image.new("RGB", (10, 10), color=colors[idx])
+        if region.width >= 80 and region.height >= 80:
+            return Image.new("RGB", (region.width, region.height), color=(255, 255, 255))
+        idx = int(max(region.x, 0) // 10)
+        idx = max(0, min(idx, len(colors) - 1))
+        return Image.new("RGB", (region.width, region.height), color=colors[idx])
+
+    def fake_refine_crop(img, padding=15):
+        i = int(state["refine_calls"])
+        state["refine_calls"] += 1
+        x = i * 10
+        w = min(10, max(1, img.width - x))
+        h = min(10, max(1, img.height))
+        return Rectangle(x=x, y=0, width=w, height=h)
 
     def fake_process_image(img, preprocess=True):
         return OCRResult(text="x", confidence=0.9, bounding_boxes=[], processing_time=0.01)
 
     monkeypatch.setattr(ocr.preprocessor, "detect_text_regions", fake_detect_text_regions)
     monkeypatch.setattr(ocr.preprocessor, "crop_text_region", fake_crop_text_region)
+    monkeypatch.setattr(ocr.preprocessor, "refine_crop", fake_refine_crop)
     monkeypatch.setattr(ocr, "process_image", fake_process_image)
 
     results = ocr.detect_and_process_regions(base_img, max_regions=10)

@@ -17,6 +17,10 @@ profiles/
 *.log
 .trae/
 
+# Runtime snapshots and local test outputs
+metrics_snapshot_*.json
+output_test*/
+
 # Local configs (use *.example.json in repo)
 config.json
 ui_config.json

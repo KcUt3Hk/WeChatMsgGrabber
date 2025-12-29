@@ -172,21 +172,7 @@ def main():
         except Exception:
             spm_range = None
 
-        messages = controller.advanced_scan_chat_history(
-            max_scrolls=args.max_scrolls,
-            direction=args.direction,
-            target_content=args.target_content,
-            stop_at_edges=args.stop_at_edges,
-            reporter=reporter,
-            scroll_speed=args.scroll_speed,
-            scroll_delay=args.scroll_delay,
-            scroll_distance_range=scroll_distance_range,
-            scroll_interval_range=scroll_interval_range,
-            max_scrolls_per_minute=args.max_scrolls_per_minute,
-            spm_range=spm_range,
-        )
-
-        # 应用过滤器（若提供）
+        # 应用过滤器（若提供）- 提前定义以供实时回调使用
         def _apply_cli_filters(messages_list):
             """
             应用发送方、时间范围、类型、内容与最低置信度过滤。
@@ -233,6 +219,86 @@ def main():
                 contains=args.contains,
                 min_confidence=args.min_confidence,
             )
+
+        # --- 实时输出配置 ---
+        # 提前解析输出配置，以便在扫描过程中实时保存
+        formats_list = []
+        if args.formats:
+            try:
+                cand = [f.strip().lower() for f in args.formats.split(',') if f.strip()]
+                seen = set()
+                for f in cand:
+                    if f not in seen:
+                        seen.add(f)
+                        formats_list.append(f)
+            except Exception:
+                logger.warning("解析 --formats 失败: %s", args.formats)
+                formats_list = []
+
+        output_override = OutputConfig(
+            format=(args.format or app_cfg.output.format),
+            directory=(args.outdir or app_cfg.output.directory),
+            enable_deduplication=(False if args.no_dedup else app_cfg.output.enable_deduplication),
+            formats=formats_list,
+            exclude_fields=( [f.strip() for f in (args.exclude_fields.split(',') if args.exclude_fields else []) if f.strip()] ),
+            exclude_time_only=bool(args.exclude_time_only),
+            aggressive_dedup=bool(args.aggressive_dedup),
+        )
+        
+        # 初始化 StorageManager 用于实时保存
+        storage_mgr = StorageManager(output_override)
+        
+        # 预计算实时输出文件路径
+        from datetime import datetime
+        from pathlib import Path
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        rt_filename_base = f"{args.prefix}_{ts}"
+        
+        active_formats = output_override.formats if output_override.formats else [(output_override.format or "json").lower()]
+        active_formats = list(set(f.lower() for f in active_formats if f))
+        
+        rt_paths = {}
+        out_dir_path = Path(output_override.directory)
+        try:
+            out_dir_path.mkdir(parents=True, exist_ok=True)
+            for fmt in active_formats:
+                rt_paths[fmt] = out_dir_path / f"{rt_filename_base}.{fmt}"
+            if rt_paths:
+                logger.info(f"实时输出已启用，文件路径: {[str(p) for p in rt_paths.values()]}")
+        except Exception as e:
+            logger.warning(f"无法创建实时输出目录，将跳过实时保存: {e}")
+
+        def on_batch_parsed(new_msgs):
+            """实时处理回调：过滤并追加写入文件"""
+            if not new_msgs:
+                return
+            
+            # 应用 CLI 过滤器（确保实时输出也符合过滤条件）
+            filtered = _apply_cli_filters(new_msgs)
+            
+            if filtered:
+                for fmt, path in rt_paths.items():
+                    try:
+                        storage_mgr.append_messages_to_file(filtered, path, fmt)
+                    except Exception as e:
+                        # 仅记录错误，不中断扫描
+                        logger.error(f"实时写入 {fmt} 失败: {e}")
+
+        messages = controller.advanced_scan_chat_history(
+            max_scrolls=args.max_scrolls,
+            direction=args.direction,
+            target_content=args.target_content,
+            stop_at_edges=args.stop_at_edges,
+            reporter=reporter,
+            scroll_speed=args.scroll_speed,
+            scroll_delay=args.scroll_delay,
+            scroll_distance_range=scroll_distance_range,
+            scroll_interval_range=scroll_interval_range,
+            max_scrolls_per_minute=args.max_scrolls_per_minute,
+            spm_range=spm_range,
+            on_batch_parsed=on_batch_parsed,
+            output_dir=(args.outdir or app_cfg.output.directory),
+        )
 
         messages = _apply_cli_filters(messages)
 
@@ -293,7 +359,7 @@ def main():
             pass
 
     except KeyboardInterrupt:
-        logger.info("用户中断扫描")
+        logger.info("用户中断扫描。注意：若在此前未看到'扫描中'相关日志，说明扫描尚未正式开始（可能处于 OCR 初始化阶段），因此无内容输出。")
     except Exception as e:
         logger.error(f"扫描失败: {e}")
         sys.exit(1)
