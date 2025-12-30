@@ -204,17 +204,45 @@ class StorageManager:
         self.logger.info(f"Saved {len(messages)} messages to {path}")
         return path
 
+    def _apply_output_filters(self, messages: List[Message]) -> List[Message]:
+        """在输出前应用存储层过滤规则并返回新列表。
+
+        函数级注释：
+        - 默认排除系统消息（MessageType.SYSTEM 或 sender 为“系统”），减少时间分隔/系统提示对分析的干扰；
+        - 若启用 OutputConfig.exclude_time_only，则进一步过滤“纯时间/日期/星期”分隔消息；
+        - 过滤发生在去重与跨批索引之前，避免被过滤的消息污染去重索引。
+        """
+        if not messages:
+            return []
+
+        out: List[Message] = list(messages)
+
+        try:
+            if bool(getattr(self.config, 'exclude_system_messages', True)):
+                out = [
+                    m for m in out
+                    if not (
+                        (m.message_type == MessageType.SYSTEM)
+                        or ((m.sender or "").strip() == "系统")
+                    )
+                ]
+        except Exception:
+            pass
+
+        try:
+            if bool(getattr(self.config, 'exclude_time_only', False)):
+                out = [m for m in out if not self._is_time_only_content(m.content)]
+        except Exception:
+            pass
+
+        return out
+
     def save_messages(self, messages: List[Message], filename_prefix: str = "extraction") -> Path:
         """Save messages to disk according to configured format.
 
         Returns the path of the written file.
         """
-        # 可选：在写入前过滤掉仅包含时间/日期的分隔消息
-        try:
-            if getattr(self.config, 'exclude_time_only', False):
-                messages = [m for m in messages if not self._is_time_only_content(m.content)]
-        except Exception:
-            pass
+        messages = self._apply_output_filters(messages)
 
         if self.config.enable_deduplication:
             # First deduplicate within this batch
@@ -258,12 +286,7 @@ class StorageManager:
         if invalid:
             raise ValueError(f"Unsupported output formats: {', '.join(invalid)}")
 
-        # 可选：在写入前过滤掉仅包含时间/日期的分隔消息
-        try:
-            if getattr(self.config, 'exclude_time_only', False):
-                messages = [m for m in messages if not self._is_time_only_content(m.content)]
-        except Exception:
-            pass
+        messages = self._apply_output_filters(messages)
 
         # 去重与索引过滤仅执行一次
         if self.config.enable_deduplication:
@@ -293,6 +316,7 @@ class StorageManager:
             file_path: Path to the target file.
             fmt: Output format (json, csv, txt, md).
         """
+        messages = self._apply_output_filters(messages)
         if not messages:
             return
 

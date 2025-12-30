@@ -112,11 +112,11 @@ class TestMessageDeduplicationStorage:
         
         # 验证去重结果
         data = json.loads(path.read_text(encoding="utf-8"))
-        assert len(data) == 4  # 6条消息去重后应为4条
+        assert len(data) == 3  # 系统消息默认会被过滤，剩余 5 条去重后为 3 条
         
         # 验证唯一消息都存在
         message_ids = {msg["id"] for msg in data}
-        expected_ids = {"msg_001", "", "msg_003", "sys_001"}
+        expected_ids = {"msg_001", "", "msg_003"}
         assert message_ids == expected_ids
         
         print("✅ JSON批内去重测试通过")
@@ -138,12 +138,12 @@ class TestMessageDeduplicationStorage:
         # 验证去重结果
         content = path.read_text(encoding="utf-8").strip()
         lines = content.splitlines()
-        assert len(lines) == 5  # 表头 + 4条数据
+        assert len(lines) == 4  # 表头 + 3条数据（系统消息默认过滤）
         
         # 验证CSV格式
         reader = csv.DictReader(lines)
         rows = list(reader)
-        assert len(rows) == 4
+        assert len(rows) == 3
         
         print("✅ CSV批内去重测试通过")
     
@@ -233,7 +233,7 @@ class TestMessageDeduplicationStorage:
         
         # 验证所有消息都被保存（无去重）
         data = json.loads(path.read_text(encoding="utf-8"))
-        assert len(data) == 6  # 无去重，所有6条消息都保存
+        assert len(data) == 5  # 无去重，但系统消息默认过滤
         
         # 验证去重索引文件不存在
         index_path = tmp_path / ".dedup_index.json"
