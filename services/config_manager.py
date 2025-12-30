@@ -160,6 +160,7 @@ class ConfigManager:
                 if isinstance(o, dict):
                     app_cfg.output.formats = o.get('formats', app_cfg.output.formats) or []
                     app_cfg.output.exclude_fields = o.get('exclude_fields', app_cfg.output.exclude_fields) or []
+                    app_cfg.output.exclude_system_messages = bool(o.get('exclude_system_messages', app_cfg.output.exclude_system_messages))
                     app_cfg.output.exclude_time_only = bool(o.get('exclude_time_only', app_cfg.output.exclude_time_only))
                     app_cfg.output.aggressive_dedup = bool(o.get('aggressive_dedup', app_cfg.output.aggressive_dedup))
                     # 用户自定义时间分隔正则列表

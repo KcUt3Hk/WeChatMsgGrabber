@@ -20,6 +20,7 @@ profiles/
 # Runtime snapshots and local test outputs
 metrics_snapshot_*.json
 output_test*/
+test_output/
 
 # Local configs (use *.example.json in repo)
 config.json

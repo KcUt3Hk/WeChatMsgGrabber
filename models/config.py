@@ -99,6 +99,8 @@ class OutputConfig:
     formats: List[str] = field(default_factory=list)
     # 需要从导出中排除的字段，例如 ["confidence_score", "raw_ocr_text"]
     exclude_fields: List[str] = field(default_factory=list)
+    # 是否排除系统消息（例如时间分隔、“你已添加为好友”等）
+    exclude_system_messages: bool = True
     # 是否排除仅包含时间/日期的系统分隔消息
     exclude_time_only: bool = False
     # 更激进的内容级去重（基于 sender + content），减少同轮重复
@@ -152,6 +154,7 @@ class AppConfig:
             # 默认不设置多格式，CLI 可覆盖
             formats=[],
             exclude_fields=[],
+            exclude_system_messages=True,
             exclude_time_only=False,
             aggressive_dedup=False,
             time_only_patterns=[],

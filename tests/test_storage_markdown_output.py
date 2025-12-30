@@ -21,6 +21,15 @@ def test_storage_manager_saves_markdown(tmp_path):
             raw_ocr_text="Hello",
         ),
         Message(
+            id="sys1",
+            sender="系统",
+            content="星期六17:30",
+            message_type=MessageType.SYSTEM,
+            timestamp=datetime(2024, 10, 1, 10, 0, 30),
+            confidence_score=0.9,
+            raw_ocr_text="星期六17:30",
+        ),
+        Message(
             id="b",
             sender="Bob",
             content="World",
@@ -37,3 +46,4 @@ def test_storage_manager_saves_markdown(tmp_path):
     assert "# WeChat Chat Export" in text
     assert "Alice" in text and "Bob" in text
     assert "Hello" in text and "World" in text
+    assert "系统" not in text
