@@ -1,0 +1,22 @@
+{
+  "python_bin": "python3",
+  "window_title": "微信",
+  "chat_area": "",
+  "direction": "up",
+  "full_fetch": false,
+  "go_top_first": false,
+  "skip_empty": true,
+  "verbose": true,
+  "ocr_lang": "ch",
+  "output_dir": "./output",
+  "filename_prefix": "auto_wechat_scan",
+  "scroll_delay": "",
+  "max_scrolls": "5000",
+  "max_spm": "60",
+  "formats": {
+    "json": true,
+    "csv": true,
+    "md": false,
+    "txt": false
+  }
+}

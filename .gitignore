@@ -1,0 +1,31 @@
+# Python caches and environments
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Outputs and logs
+output/
+outputs/
+tmp/
+reports/
+profiles/
+*.log
+.trae/
+
+# Runtime snapshots and local test outputs
+metrics_snapshot_*.json
+output_test*/
+test_output/
+
+# Local configs (use *.example.json in repo)
+config.json
+ui_config.json
+
+# Playwright/Browser caches
+playwright-report/
+playwright/.cache/
