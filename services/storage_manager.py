@@ -164,9 +164,17 @@ class StorageManager:
 
         if fmt == "json":
             path = self._generate_filename(filename_prefix, "json")
-            data = [self._message_to_dict(m) for m in messages]
             with path.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.write("[\n")
+                for i, m in enumerate(messages):
+                    json_str = json.dumps(self._message_to_dict(m), ensure_ascii=False, indent=2)
+                    indented_json = "\n".join("  " + line for line in json_str.split("\n"))
+                    f.write(indented_json)
+                    if i < len(messages) - 1:
+                        f.write(",\n")
+                    else:
+                        f.write("\n")
+                f.write("]\n")
             self.logger.info(f"Saved {len(messages)} messages to {path}")
             return path
 

@@ -16,19 +16,19 @@ class OCRConfig:
     # 说明：
     # - 在多数端到端聊天截图场景中，文本布局较为规整，关闭角度分类可显著降低处理开销；
     # - 若识别包含大量旋转文本或需要对倾斜文本做校正，可开启。
-    use_angle_cls: bool = False
+    use_angle_cls: bool = True
 
     # 预处理开关（作用于整图处理流程）。
     # 在性能敏感场景下，可关闭高开销步骤（例如双边滤波降噪）。
     preprocess_enhance_quality: bool = True
     preprocess_reduce_noise: bool = True
-    preprocess_noise_method: str = "gaussian"  # gaussian/median/bilateral
+    preprocess_noise_method: str = "bilateral"  # gaussian/median/bilateral
     preprocess_convert_grayscale: bool = True
     # 整图预处理的最大边限制（像素）。当原图的宽或高超过该值时，按比例缩小到该最大边，降低后续推理与几何校正开销。
     # 说明：
     # - 对聊天截图等高分辨率图片，下采样到合理尺寸（如 1280）通常不影响可读性，能显著加速；
     # - 设置为 0 或 None 可禁用该缩放。
-    preprocess_max_side: int = 1600
+    preprocess_max_side: int = 3840
 
     # 预处理开关（作用于裁剪区域的识别流程）。
     # 裁剪区域通常较小，降噪收益有限且开销相对更高，建议默认关闭。
@@ -98,13 +98,13 @@ class OutputConfig:
     # 同时导出多种格式（若非空则优先生效），例如 ["json", "csv"]
     formats: List[str] = field(default_factory=list)
     # 需要从导出中排除的字段，例如 ["confidence_score", "raw_ocr_text"]
-    exclude_fields: List[str] = field(default_factory=list)
+    exclude_fields: List[str] = field(default_factory=lambda: ["confidence_score", "raw_ocr_text"])
     # 是否排除系统消息（例如时间分隔、“你已添加为好友”等）
     exclude_system_messages: bool = True
     # 是否排除仅包含时间/日期的系统分隔消息
-    exclude_time_only: bool = False
+    exclude_time_only: bool = True
     # 更激进的内容级去重（基于 sender + content），减少同轮重复
-    aggressive_dedup: bool = False
+    aggressive_dedup: bool = True
     # 用户自定义的“纯时间/日期分隔”识别正则列表（追加到内置规则之后）
     time_only_patterns: List[str] = field(default_factory=list)
 
@@ -153,10 +153,10 @@ class AppConfig:
             enable_deduplication=self.enable_deduplication,
             # 默认不设置多格式，CLI 可覆盖
             formats=[],
-            exclude_fields=[],
+            exclude_fields=["confidence_score", "raw_ocr_text"],
             exclude_system_messages=True,
-            exclude_time_only=False,
-            aggressive_dedup=False,
+            exclude_time_only=True,
+            aggressive_dedup=True,
             time_only_patterns=[],
         )
     

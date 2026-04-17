@@ -215,6 +215,19 @@ class OCRProcessor:
             lang_attempts = [requested_lang] + fallback_langs
             last_error: Optional[Exception] = None
 
+            # [Optimization] Enable MPS (Metal Performance Shaders) on Apple Silicon
+            try:
+                import platform
+                if platform.system() == 'Darwin' and platform.machine() == 'arm64':
+                    import paddle
+                    try:
+                        paddle.device.set_device('mps')
+                        self.logger.info("Successfully enabled MPS hardware acceleration on Apple Silicon.")
+                    except Exception as e:
+                        self.logger.debug(f"Failed to set MPS device for Paddle: {e}")
+            except Exception as e:
+                self.logger.debug(f"MPS optimization check failed: {e}")
+
             # 在初始化 PaddleOCR 之前，按需启用 YAML 与 paddlex 的缓存猴子补丁
             try:
                 # 允许通过环境变量强制关闭 paddlex 相关补丁，以避免无意间引入额外模型加载
@@ -1000,9 +1013,9 @@ class OCRProcessor:
             elif preprocess and is_cropped_region:
                 # 针对裁剪的小区域（如气泡），如果高度过小，进行上采样以提高 OCR 识别率
                 try:
-                    # 只有当高度小于 80 像素时才上采样（标准微信气泡高度通常在 40-100 之间）
-                    if h0 > 0 and h0 < 80:
-                        scale_up = 2.0
+                    # 只有当高度小于 100 像素时才上采样（标准微信气泡高度通常在 40-100 之间）
+                    if h0 > 0 and h0 < 100:
+                        scale_up = 2.5
                         scale_factor = 1.0 / scale_up
                         new_w0 = int(round(w0 * scale_up))
                         new_h0 = int(round(h0 * scale_up))
@@ -1026,7 +1039,7 @@ class OCRProcessor:
                 # - 预处理开关源于 OCRConfig，可通过 preprocess_options 覆盖；
                 # - 裁剪区域识别时建议关闭高开销的降噪（双边滤波），整图处理可按需开启。
                 # - 对于裁剪的小区域（气泡），添加填充（padding）有助于 OCR 识别边缘文字。
-                padding_val = 10 if is_cropped_region else 0
+                padding_val = 15 if is_cropped_region else 0
                 
                 processed_image = self.preprocessor.preprocess_for_ocr(
                     input_image_for_preprocess,
@@ -2264,7 +2277,11 @@ class OCRProcessor:
             # 收集“无文字”的候选区域，后续基于几何与相对尺寸进行媒体气泡（图片/贴图）判定
             empty_candidates: List[Tuple[Rectangle, Image.Image, OCRResult]] = []
             
-            for region_rect in detected_regions:
+            from concurrent.futures import ThreadPoolExecutor
+            import threading
+            _cache_lock = threading.Lock()
+
+            def _process_single_region(region_rect):
                 # [Optimization] Refine crop region to be tight around content with padding
                 # 1. Expand region slightly to capture potential missing edges or context
                 # This ensures we have enough background to identify the true content boundary
@@ -2299,7 +2316,9 @@ class OCRProcessor:
                 
                 # Try cache first to skip duplicated OCR
                 cache_key = self._get_image_hash(cropped_image)
-                ocr_result = self._ocr_cache.get(cache_key)
+                with _cache_lock:
+                    ocr_result = self._ocr_cache.get(cache_key)
+                
                 if ocr_result is None:
                     # 指标统计：裁剪区域 OCR 缓存未命中
                     try:
@@ -2333,21 +2352,23 @@ class OCRProcessor:
                         # 回退：仅传入图像参数，最大化兼容性
                         ocr_result = process_fn(cropped_image)
                     # Insert into LRU cache
-                    self._ocr_cache[cache_key] = ocr_result
-                    # Move to end to mark as recently used
-                    self._ocr_cache.move_to_end(cache_key)
-                    # Enforce max size
-                    if len(self._ocr_cache) > self._cache_max_items:
-                        # pop the oldest item
-                        self._ocr_cache.popitem(last=False)
-                        try:
-                            with self._metrics_lock:
-                                self._metrics["ocr_cache_evictions"] += 1
-                        except Exception:
-                            pass
+                    with _cache_lock:
+                        self._ocr_cache[cache_key] = ocr_result
+                        # Move to end to mark as recently used
+                        self._ocr_cache.move_to_end(cache_key)
+                        # Enforce max size
+                        if len(self._ocr_cache) > self._cache_max_items:
+                            # pop the oldest item
+                            self._ocr_cache.popitem(last=False)
+                            try:
+                                with self._metrics_lock:
+                                    self._metrics["ocr_cache_evictions"] += 1
+                            except Exception:
+                                pass
                 else:
                     # Touch the item in LRU order
-                    self._ocr_cache.move_to_end(cache_key)
+                    with _cache_lock:
+                        self._ocr_cache.move_to_end(cache_key)
                     # 指标统计：裁剪区域 OCR 缓存命中
                     try:
                         with self._metrics_lock:
@@ -2355,17 +2376,27 @@ class OCRProcessor:
                     except Exception:
                         pass
                 
-                # Create TextRegion with the detected rectangle and OCR text
-                if ocr_result.text.strip():  # 仅包含识别出文字的区域
-                    text_region = TextRegion(
-                        text=ocr_result.text,
-                        bounding_box=region_rect,
-                        confidence=ocr_result.confidence
-                    )
-                    results.append((text_region, ocr_result))
-                else:
-                    # 无文字：记录为候选，稍后统一进行“媒体气泡”几何判定
-                    empty_candidates.append((region_rect, cropped_image, ocr_result))
+                return region_rect, cropped_image, ocr_result
+
+            workers = min(4, len(detected_regions) if detected_regions else 1)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(_process_single_region, rect) for rect in detected_regions]
+                for future in futures:
+                    try:
+                        region_rect, cropped_image, ocr_result = future.result()
+                        # Create TextRegion with the detected rectangle and OCR text
+                        if ocr_result.text.strip():  # 仅包含识别出文字的区域
+                            text_region = TextRegion(
+                                text=ocr_result.text,
+                                bounding_box=region_rect,
+                                confidence=ocr_result.confidence
+                            )
+                            results.append((text_region, ocr_result))
+                        else:
+                            # 无文字：记录为候选，稍后统一进行“媒体气泡”几何判定
+                            empty_candidates.append((region_rect, cropped_image, ocr_result))
+                    except Exception as e:
+                        self.logger.error(f"Concurrent processing failed for region: {e}")
 
             # 二次处理：对“无文字”的候选区域应用几何/相对尺寸启发式，生成占位 TextRegion
             try:
